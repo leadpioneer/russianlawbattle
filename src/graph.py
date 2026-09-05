@@ -51,6 +51,7 @@ EVENT_AGENT_END = "agent_end"  # реплика готова (role, round, text 
 EVENT_JUDGE_DECISION = "judge_decision"  # решение судьи по раунду (continues, addressee)
 EVENT_VERDICT_DONE = "verdict_done"  # итоговое решение вынесено
 EVENT_DEBATE_DONE = "debate_done"  # симуляция завершена (payload: статистика)
+EVENT_ERROR = "error"  # фатальная ошибка симуляции (payload: message) — публикует бэкенд при сбое
 
 
 @dataclass(frozen=True)
@@ -363,6 +364,7 @@ def clear_case_cache() -> None:
 
 def run_debate(
     *,
+    cfg: Config | None = None,
     max_rounds: int | None = None,
     sink: EventSink | None = None,
     on_delta: OutputCallback | None = None,
@@ -371,17 +373,20 @@ def run_debate(
 ) -> DebateResult:
     """Запустить симуляцию прений и вернуть итог (история + вердикт).
 
+    :param cfg: готовый конфиг (веб-сессии со своим ``project_root``); если задан,
+        ``config_path`` игнорируется. По умолчанию — загрузка из ``config.yaml``.
     :param max_rounds: переопределение лимита раундов из конфига (для быстрых прогонов).
     :param sink: подписчик на события :class:`DebateEvent` (консоль/WebSocket).
     :param on_delta: legacy-колбэк стриминга текста агентов (вывод в консоль).
     :param announce: legacy-колбэк объявления спикера (название роли, номер раунда).
     :param config_path: путь к config.yaml (по умолчанию — config.yaml проекта).
     """
-    cfg = load_config(config_path) if config_path else load_config()
+    effective = cfg if cfg is not None else load_config(config_path)
     if max_rounds is not None:
         if max_rounds < 1:
             raise ValueError(f"max_rounds должен быть >= 1, получено: {max_rounds}.")
-        cfg = replace(cfg, max_rounds=max_rounds)
+        effective = replace(effective, max_rounds=max_rounds)
+    cfg = effective
 
     reset_clients()
     set_config(cfg)  # клиенты и суммаризатор должны использовать тот же конфиг
