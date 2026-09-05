@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import logging
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -51,6 +51,7 @@ _ALLOWED_KEYS: set[str] = {
     "jurisdiction",
     "max_rounds",
     "max_context_tokens",
+    "llm_params",
 }
 
 
@@ -71,6 +72,7 @@ class Config:
     jurisdiction: str
     max_rounds: int = DEFAULT_MAX_ROUNDS
     max_context_tokens: int = DEFAULT_MAX_CONTEXT_TOKENS
+    llm_params: dict[str, Any] = field(default_factory=dict)
     project_root: Path = PROJECT_ROOT
 
     # --- пути, производные от корня проекта --------------------------------
@@ -118,6 +120,7 @@ class Config:
                 f"  юрисдикция         : {self.jurisdiction}",
                 f"  max_rounds         : {self.max_rounds}",
                 f"  max_context_tokens : {self.max_context_tokens}",
+                f"  llm_params         : {self.llm_params if self.llm_params else '(не заданы)'}",
                 f"  каталог дела       : {self.case_files_dir}",
                 f"  контекст дела      : {self.case_context_file}",
                 f"  каталог отчётов    : {self.output_dir}",
@@ -223,6 +226,12 @@ def load_config(config_path: str | Path = DEFAULT_CONFIG_PATH) -> Config:
     max_context_tokens = _as_int(
         raw, "max_context_tokens", DEFAULT_MAX_CONTEXT_TOKENS, minimum=1000
     )
+    llm_params = raw.get("llm_params", {})
+    if not isinstance(llm_params, dict) or not all(isinstance(k, str) for k in llm_params):
+        raise ConfigError(
+            "Ключ «llm_params» должен быть словарём доп. параметров запроса "
+            "(например: max_tokens, reasoning)."
+        )
 
     logger.info("Конфигурация загружена: %s", path.resolve())
     return Config(
@@ -235,5 +244,6 @@ def load_config(config_path: str | Path = DEFAULT_CONFIG_PATH) -> Config:
         jurisdiction=jurisdiction,
         max_rounds=max_rounds,
         max_context_tokens=max_context_tokens,
+        llm_params=dict(llm_params),
         project_root=PROJECT_ROOT,
     )

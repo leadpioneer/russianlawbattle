@@ -21,7 +21,6 @@ import logging
 import operator
 from collections.abc import Callable
 from dataclasses import dataclass, replace
-from functools import lru_cache
 from typing import Annotated, TypedDict
 
 from langgraph.graph import END, START, StateGraph
@@ -200,10 +199,21 @@ def build_graph(
     return graph.compile()
 
 
-@lru_cache(maxsize=1)
+#: Кэш материалов дела в пределах процесса (ключ — корень проекта).
+_case_cache: dict[str, CaseMaterials] = {}
+
+
 def _load_case_cached(cfg: Config) -> CaseMaterials:
     """Материалы дела с кэшем: за прогон симуляции дело загружается один раз."""
-    return load_case(cfg)
+    key = str(cfg.project_root)
+    if key not in _case_cache:
+        _case_cache[key] = load_case(cfg)
+    return _case_cache[key]
+
+
+def clear_case_cache() -> None:
+    """Сбросить кэш материалов дела (например, если файлы дела изменились)."""
+    _case_cache.clear()
 
 
 def run_debate(
@@ -228,7 +238,7 @@ def run_debate(
 
     reset_clients()
     set_config(cfg)  # клиенты и суммаризатор должны использовать тот же конфиг
-    _load_case_cached.cache_clear()
+    clear_case_cache()
     logger.info(
         "Старт симуляции: юрисдикция=%s; модели: заявитель=%s, ответчик=%s, судья=%s; max_rounds=%d.",
         cfg.jurisdiction,

@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Callable
+from typing import Any, Callable
 
 from openai import APIError, OpenAI
 
@@ -81,6 +81,7 @@ def chat(
     *,
     temperature: float = 0.7,
     on_delta: DeltaCallback | None = None,
+    extra_params: dict[str, Any] | None = None,
 ) -> str:
     """Один запрос к модели роли: системный промпт + история сообщений.
 
@@ -92,6 +93,8 @@ def chat(
     :param messages: история диалога (сообщения с ролями ``user``/``assistant``).
     :param temperature: температура сэмплирования.
     :param on_delta: колбэк стриминга; ``None`` — стримить только в лог.
+    :param extra_params: доп. параметры запроса (max_tokens, reasoning и т.п.),
+        передаются роутеру через ``extra_body``; объединяются с ``cfg.llm_params``.
     :returns: полный текст ответа модели.
     :raises ConfigError: неизвестная роль или проблемы конфига.
     :raises RuntimeError: ошибка API или пустой ответ модели.
@@ -100,14 +103,16 @@ def chat(
     model = cfg.model_for(role)
     client = get_client(role)
     payload = [{"role": "system", "content": system_prompt}, *messages]
+    extra_body: dict[str, Any] = {**cfg.llm_params, **(extra_params or {})}
 
     logger.info(
-        "LLM-запрос: роль=%s модель=%s роутер=%s сообщений=%d temperature=%.1f",
+        "LLM-запрос: роль=%s модель=%s роутер=%s сообщений=%d temperature=%.1f доп.параметры=%s",
         role,
         model,
         cfg.api_base_url,
         len(messages),
         temperature,
+        extra_body or "нет",
     )
     started = time.perf_counter()
     chunks: list[str] = []
@@ -117,6 +122,7 @@ def chat(
             messages=payload,
             temperature=temperature,
             stream=True,
+            extra_body=extra_body or None,
         ) as stream:
             for event in stream:
                 if not event.choices:
