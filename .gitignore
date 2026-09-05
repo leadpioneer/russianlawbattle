@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Секреты
+.env
+
+# Материалы дел и сгенерированные отчёты (плейсхолдеры оставляем в git)
+case_files/*
+!case_files/.gitkeep
+output/*
+!output/.gitkeep
+
+# IDE / ОС
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
