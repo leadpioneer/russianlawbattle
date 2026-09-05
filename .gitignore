@@ -11,6 +11,7 @@ config.yaml
 # Материалы дел и сгенерированные отчёты (плейсхолдеры оставляем в git)
 case_files/*
 !case_files/.gitkeep
+case_context.md
 output/*
 !output/.gitkeep
 
