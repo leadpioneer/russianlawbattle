@@ -4,8 +4,9 @@ __pycache__/
 .venv/
 venv/
 
-# Секреты
+# Секреты и локальный конфиг (шаблоны .env.example / config.yaml.example остаются в git)
 .env
+config.yaml
 
 # Материалы дел и сгенерированные отчёты (плейсхолдеры оставляем в git)
 case_files/*
