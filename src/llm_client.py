@@ -41,6 +41,12 @@ def get_config() -> Config:
     return _config
 
 
+def set_config(cfg: Config) -> None:
+    """Подменить кэшированный конфиг (используется оркестратором при переопределениях)."""
+    global _config
+    _config = cfg
+
+
 def reset_clients() -> None:
     """Сбросить кэш конфига и клиентов (для тестов и перечитывания конфига)."""
     global _config
