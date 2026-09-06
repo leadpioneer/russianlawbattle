@@ -42,6 +42,7 @@ def render_report(result: DebateResult, generated_at: datetime | None = None) ->
     ]
     if cfg.llm_params:
         lines.append(f"- **Доп. параметры запросов:** `{cfg.llm_params}`")
+    lines.append(f"- **Сторона для рекомендаций:** {result.target_side}")
 
     lines += [
         "",
@@ -65,6 +66,21 @@ def render_report(result: DebateResult, generated_at: datetime | None = None) ->
         lines += [f"#### {statement.speaker_title}", "", statement.text.strip(), ""]
 
     lines += ["## Итоговое решение судьи", "", result.verdict.strip(), ""]
+
+    if result.recommendations is not None:
+        rec = result.recommendations
+        lines += [
+            "---",
+            "",
+            f"# РЕКОМЕНДАЦИИ ДЛЯ СТОРОНЫ: {rec.side_title.upper()}",
+            "",
+            f"**Качественная оценка перспектив: {rec.prospects.upper()}**",
+            "",
+            "⚠ Блок подготовлен ИИ-аналитиком для подготовки к спору и не заменяет юриста.",
+            "",
+            rec.text.strip(),
+            "",
+        ]
     return "\n".join(lines)
 
 

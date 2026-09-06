@@ -68,6 +68,11 @@ def run(
         f"{'решением судьи' if result.finished_by_judge else 'лимитом раундов'}."
     )
     console.print(f"Реплик: {len(result.history)}; вердикт: {len(result.verdict)} символов.")
+    if result.recommendations is not None:
+        console.print(
+            f"Рекомендации для стороны [bold]{result.recommendations.side_title}[/bold]: "
+            f"перспектива [bold]{result.recommendations.prospects}[/bold] (блок в отчёте)."
+        )
     console.print(f"Отчёт: [bold green]{report_path}[/bold green]")
 
 

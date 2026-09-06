@@ -4,7 +4,8 @@
 
     START -> init -> claimant_turn -> defendant_turn -> judge_review
     judge_review --(судья: ПРОДОЛЖАТЬ и лимит раундов не исчерпан)--> claimant_turn
-    judge_review --(иначе: ЗАВЕРШИТЬ или достигнут max_rounds)------> final_verdict -> END
+    judge_review --(иначе: ЗАВЕРШИТЬ или достигнут max_rounds)------> final_verdict
+    final_verdict -> recommendations (блок рекомендаций для target_side) -> END
 
 Судья-супервизор единственный решает, когда прения заканчиваются; ``max_rounds``
 из конфига — жёсткий предохранитель. Полная история реплик остаётся в состоянии
@@ -27,7 +28,7 @@ from typing import Annotated, TypedDict
 
 from langgraph.graph import END, START, StateGraph
 
-from .agents import claimant_lawyer, defendant_lawyer
+from .agents import advisor, claimant_lawyer, defendant_lawyer
 from .agents import judge as judge_agent
 from .agents.base import ROLE_CLAIMANT, ROLE_DEFENDANT, ROLE_JUDGE, SPEAKER_TITLES, Statement
 from .config import Config, load_config
@@ -49,6 +50,7 @@ EVENT_AGENT_START = "agent_start"  # агент начинает реплику 
 EVENT_DELTA = "delta"  # фрагмент генерируемого текста (role, round, text)
 EVENT_AGENT_END = "agent_end"  # реплика готова (role, round, text — полный текст)
 EVENT_JUDGE_DECISION = "judge_decision"  # решение судьи по раунду (continues, addressee)
+EVENT_RECOMMENDATIONS_DONE = "recommendations_done"  # блок рекомендаций готов (payload: target_side, prospects)
 EVENT_VERDICT_DONE = "verdict_done"  # итоговое решение вынесено
 EVENT_DEBATE_DONE = "debate_done"  # симуляция завершена (payload: статистика)
 EVENT_ERROR = "error"  # фатальная ошибка симуляции (payload: message) — публикует бэкенд при сбое
@@ -86,6 +88,7 @@ NODE_CLAIMANT = "claimant_turn"
 NODE_DEFENDANT = "defendant_turn"
 NODE_JUDGE = "judge_review"
 NODE_VERDICT = "final_verdict"
+NODE_RECOMMENDATIONS = "recommendations"
 
 
 class DebateState(TypedDict, total=False):
@@ -97,6 +100,8 @@ class DebateState(TypedDict, total=False):
     round_number: int
     judge_decision: judge_agent.JudgeDecision | None
     verdict: str
+    target_side: str  # чья сторона нужна для рекомендаций: claimant | defendant
+    recommendations: advisor.Recommendation | None  # блок рекомендаций (последний узел)
 
 
 @dataclass(frozen=True)
@@ -109,6 +114,8 @@ class DebateResult:
     verdict: str
     rounds_played: int
     finished_by_judge: bool  # True — судья решил ЗАВЕРШИТЬ; False — достигнут max_rounds
+    target_side: str = "claimant"  # сторона, для которой готовились рекомендации
+    recommendations: advisor.Recommendation | None = None  # блок рекомендаций (после вердикта)
 
 
 def build_graph(
@@ -323,12 +330,66 @@ def build_graph(
         logger.info("Узел %s: решение готово (%d симв.).", NODE_VERDICT, len(verdict))
         return {"verdict": verdict}
 
+    def recommendations_node(state: DebateState) -> dict:
+        """Блок рекомендаций для стороны, выбранной пользователем (target_side)."""
+        round_number = state["round_number"]
+        emit(
+            DebateEvent(
+                EVENT_AGENT_START,
+                role=ROLE_JUDGE,
+                speaker_title=advisor.ADVISOR_TITLE,
+                round=round_number,
+                model=cfg.model_for(ROLE_JUDGE),
+            )
+        )
+        rec = advisor.generate_recommendations(
+            state["cfg"],
+            state["materials"],
+            state.get("history", []),
+            state.get("verdict", ""),
+            state.get("target_side", "claimant"),
+            on_delta=lambda chunk: emit(
+                DebateEvent(
+                    EVENT_DELTA,
+                    role=ROLE_JUDGE,
+                    speaker_title=advisor.ADVISOR_TITLE,
+                    round=round_number,
+                    text=chunk,
+                )
+            ),
+        )
+        emit(
+            DebateEvent(
+                EVENT_AGENT_END,
+                role=ROLE_JUDGE,
+                speaker_title=advisor.ADVISOR_TITLE,
+                round=round_number,
+                text=rec.text,
+            )
+        )
+        emit(
+            DebateEvent(
+                EVENT_RECOMMENDATIONS_DONE,
+                role=ROLE_JUDGE,
+                round=round_number,
+                payload={"target_side": rec.target_side, "prospects": rec.prospects},
+            )
+        )
+        logger.info(
+            "Узел %s: рекомендации для %s (перспектива: %s).",
+            NODE_RECOMMENDATIONS,
+            rec.target_side,
+            rec.prospects,
+        )
+        return {"recommendations": rec}
+
     graph = StateGraph(DebateState)
     graph.add_node(NODE_INIT, init)
     graph.add_node(NODE_CLAIMANT, claimant_turn)
     graph.add_node(NODE_DEFENDANT, defendant_turn)
     graph.add_node(NODE_JUDGE, judge_review)
     graph.add_node(NODE_VERDICT, final_verdict)
+    graph.add_node(NODE_RECOMMENDATIONS, recommendations_node)
 
     graph.add_edge(START, NODE_INIT)
     graph.add_edge(NODE_INIT, NODE_CLAIMANT)
@@ -339,7 +400,8 @@ def build_graph(
         should_continue,
         {NODE_CLAIMANT: NODE_CLAIMANT, NODE_VERDICT: NODE_VERDICT},
     )
-    graph.add_edge(NODE_VERDICT, END)
+    graph.add_edge(NODE_VERDICT, NODE_RECOMMENDATIONS)
+    graph.add_edge(NODE_RECOMMENDATIONS, END)
 
     logger.info("Граф прений собран: init -> claimant_turn -> defendant_turn -> judge_review -> ...")
     return graph.compile()
@@ -366,6 +428,7 @@ def run_debate(
     *,
     cfg: Config | None = None,
     max_rounds: int | None = None,
+    target_side: str = "claimant",
     sink: EventSink | None = None,
     on_delta: OutputCallback | None = None,
     announce: SpeakerAnnouncer | None = None,
@@ -376,16 +439,25 @@ def run_debate(
     :param cfg: готовый конфиг (веб-сессии со своим ``project_root``); если задан,
         ``config_path`` игнорируется. По умолчанию — загрузка из ``config.yaml``.
     :param max_rounds: переопределение лимита раундов из конфига (для быстрых прогонов).
+    :param target_side: чья сторона нужна для рекомендаций: ``claimant`` | ``defendant``.
     :param sink: подписчик на события :class:`DebateEvent` (консоль/WebSocket).
     :param on_delta: legacy-колбэк стриминга текста агентов (вывод в консоль).
     :param announce: legacy-колбэк объявления спикера (название роли, номер раунда).
     :param config_path: путь к config.yaml (по умолчанию — config.yaml проекта).
     """
-    effective = cfg if cfg is not None else load_config(config_path)
+    effective = (
+        cfg
+        if cfg is not None
+        else (load_config(config_path) if config_path else load_config())
+    )
     if max_rounds is not None:
         if max_rounds < 1:
             raise ValueError(f"max_rounds должен быть >= 1, получено: {max_rounds}.")
         effective = replace(effective, max_rounds=max_rounds)
+    if target_side not in advisor.TARGET_SIDES:
+        raise ValueError(
+            f"target_side должен быть одним из {advisor.TARGET_SIDES}, получено: {target_side!r}."
+        )
     cfg = effective
 
     reset_clients()
@@ -401,7 +473,7 @@ def run_debate(
     )
 
     graph = build_graph(cfg, sink=sink, on_delta=on_delta, announce=announce)
-    final: DebateState = graph.invoke({})
+    final: DebateState = graph.invoke({"target_side": target_side})
 
     decision = final.get("judge_decision")
     result = DebateResult(
@@ -411,6 +483,8 @@ def run_debate(
         verdict=final["verdict"],
         rounds_played=final["round_number"],
         finished_by_judge=bool(decision is not None and not decision.continues),
+        target_side=target_side,
+        recommendations=final.get("recommendations"),
     )
     logger.info(
         "Симуляция завершена: раундов=%d, завершена судьёй=%s, реплик=%d, вердикт=%d симв.",
@@ -428,6 +502,9 @@ def run_debate(
                     "finished_by_judge": result.finished_by_judge,
                     "statements": len(result.history),
                     "verdict_length": len(result.verdict),
+                    "recommendations_prospects": (
+                        result.recommendations.prospects if result.recommendations else None
+                    ),
                 },
             )
         )

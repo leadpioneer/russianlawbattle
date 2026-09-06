@@ -105,7 +105,11 @@ def run_session_in_thread(session: Session) -> threading.Thread:
         try:
             session.status = STATUS_RUNNING
             logger.info("Сессия %s: старт симуляции.", session.id)
-            result = run_debate(cfg=session.config, sink=session.events.append)
+            result = run_debate(
+                cfg=session.config,
+                target_side=session.target_side,
+                sink=session.events.append,
+            )
             session.result = result
             session.report_md = render_report(result)
             session.report_path = save_report(result)

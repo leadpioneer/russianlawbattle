@@ -250,6 +250,7 @@ def report(session_id: str, format: str = "md") -> Any:
         return PlainTextResponse(session.report_md or "", media_type="text/markdown; charset=utf-8")
     if format == "json":
         result = session.result
+        rec = result.recommendations
         return {
             **session.public_info(),
             "params": {
@@ -273,7 +274,14 @@ def report(session_id: str, format: str = "md") -> Any:
                 for statement in result.history
             ],
             "verdict": result.verdict,
-            "recommendations": None,  # блок рекомендаций — шаг 3
+            "recommendations": None
+            if rec is None
+            else {
+                "target_side": rec.target_side,
+                "side_title": rec.side_title,
+                "prospects": rec.prospects,
+                "text": rec.text,
+            },
             "report_file": str(session.report_path) if session.report_path else None,
         }
     raise HTTPException(status_code=400, detail="format должен быть md или json")
