@@ -694,6 +694,13 @@ def _run_evidence_pack(
             service=service,
             materials=materials,
         )
+        # Persist в каталог сессии — для /api/session/{id}/evidence и отчётов.
+        try:
+            from .legal.evidence_pack import save_evidence_pack
+
+            save_evidence_pack(pack, cfg.project_root)
+        except Exception as exc:  # noqa: BLE001 — persist не критичен
+            logger.warning("Не удалось сохранить evidence_pack.json: %s", exc)
         for source in pack.sources:
             emit(
                 DebateEvent(

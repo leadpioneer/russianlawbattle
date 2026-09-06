@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { DebateEvent, DefaultsData, TargetSide } from "@/lib/api";
-import { API_BASE, checkHealth, connectSessionSocket, createSession, fetchDefaults, fetchReport, reportDownloadUrl, startRun, stopDebate, uploadCase } from "@/lib/api";
+import { API_BASE, checkHealth, connectSessionSocket, createSession, fetchDefaults, fetchEvidence, fetchReport, reportDownloadUrl, startRun, stopDebate, uploadCase } from "@/lib/api";
 
 /** Ключ localStorage с настройками формы (восстанавливаются при следующем открытии). */
 const SETTINGS_KEY = "court-sim-settings-v1";
@@ -253,6 +253,7 @@ export default function Home() {
 
   // --- итог ---
   const [report, setReport] = useState<Awaited<ReturnType<typeof fetchReport>> | null>(null);
+  const [evidence, setEvidence] = useState<Awaited<ReturnType<typeof fetchEvidence>>>(null);
   const sessionIdRef = useRef<string | null>(null);
   // Живость бэкенда (индикатор в шапке).
   const [backendUp, setBackendUp] = useState<boolean | null>(null);
@@ -402,6 +403,8 @@ export default function Home() {
             const data = await fetchReport(sessionId);
             setReport(data);
             setStage("final");
+            // Evidence Pack — параллельно; null, если ещё не собран.
+            fetchEvidence(sessionId).then(setEvidence).catch(() => setEvidence(null));
           } catch {
             // Сессия остановлена пользователем — возвращаемся к материалам дела.
             setStage("upload");
@@ -1139,6 +1142,78 @@ export default function Home() {
                   </li>
                 ))}
               </ul>
+            </article>
+          )}
+
+          {evidence && evidence.sources.length > 0 && (
+            <article className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
+              <h3 className="mb-1 text-base font-bold">Правовые источники (Evidence Pack)</h3>
+              <p className="mb-3 text-xs text-slate-500">
+                Подтверждено: {evidence.sources.filter((s) => s.verification_status === "verified").length} ·
+                частично: {evidence.sources.filter((s) => s.verification_status === "partially_verified").length} ·
+                непроверено: {evidence.sources.filter((s) => s.verification_status === "unverified").length}
+                {evidence.case_law_coverage && (
+                  <> · покрытие практики: {evidence.case_law_coverage.coverage === "official_only" ? "только официальный ВС РФ" : evidence.case_law_coverage.coverage === "limited" ? "ограничено" : "источники недоступны"}</>
+                )}
+              </p>
+
+              {evidence.case_law_coverage && (
+                <div className="mb-3 rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-900">
+                  ⚠ {evidence.case_law_coverage.warning ?? "Покрытие поиска практики ограничено: по практике нижестоящих судов массовый поиск не выполнялся."}
+                </div>
+              )}
+
+              <ul className="space-y-3 text-sm">
+                {evidence.sources.map((source) => {
+                  const badge =
+                    source.verification_status === "verified"
+                      ? { text: "подтверждён", cls: "bg-emerald-100 text-emerald-800" }
+                      : source.verification_status === "partially_verified"
+                        ? { text: "частично", cls: "bg-amber-100 text-amber-800" }
+                        : { text: "не проверен", cls: "bg-slate-100 text-slate-600" };
+                  const level = source.authority_level ? ` · уровень ${source.authority_level}` : "";
+                  return (
+                    <li key={source.id} className="rounded-lg border border-slate-100 p-3">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="font-mono text-xs text-slate-400">[{source.id}]</span>
+                        <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${badge.cls}`}>
+                          {badge.text}
+                        </span>
+                        <span className="text-xs text-slate-500">{source.source_type}{level}</span>
+                      </div>
+                      <p className="mt-1 font-medium">{source.citation}</p>
+                      {source.title !== source.citation && (
+                        <p className="text-xs text-slate-500">{source.title}</p>
+                      )}
+                      {source.excerpt && (
+                        <p className="mt-1 line-clamp-3 text-xs text-slate-600">{source.excerpt}</p>
+                      )}
+                      {source.warning && (
+                        <p className="mt-1 text-xs text-amber-700">⚠ {source.warning}</p>
+                      )}
+                      {source.official_url && (
+                        <a
+                          className="mt-1 inline-block rounded-md bg-slate-100 px-2 py-1 text-xs font-medium text-blue-700 hover:bg-slate-200"
+                          href={source.official_url}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                        >
+                          Открыть первоисточник ↗
+                        </a>
+                      )}
+                    </li>
+                  );
+                })}
+              </ul>
+
+              {evidence.provider_statuses.length > 0 && (
+                <div className="mt-3 border-t border-slate-100 pt-2 text-xs text-slate-500">
+                  Источники данных:{" "}
+                  {evidence.provider_statuses
+                    .map((p) => `${p.provider} — ${p.status}`)
+                    .join("; ")}
+                </div>
+              )}
             </article>
           )}
 

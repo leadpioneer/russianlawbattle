@@ -64,6 +64,62 @@ export interface EvidencePackReadyPayload {
   total_sources?: number;
 }
 
+/** Карточка источника Evidence Pack (этап 3). */
+export interface LegalSourceCard {
+  id: string;
+  source_type: string;
+  title: string;
+  authority: string;
+  citation: string;
+  excerpt: string;
+  official_url: string | null;
+  effective_date: string | null;
+  decision_date: string | null;
+  case_number: string | null;
+  court: string | null;
+  verified: boolean;
+  verification_status:
+    | "verified"
+    | "partially_verified"
+    | "unverified"
+    | "unavailable"
+    | "contradicted";
+  provider: string;
+  retrieved_at: string;
+  relevance_score: number;
+  supports_issues: string[];
+  warning: string | null;
+  authority_level: string | null;
+}
+
+/** Покрытие поиска судебной практики (шаг 8). */
+export interface CaseLawCoverage {
+  searched_sources: string[];
+  not_searched_sources: string[];
+  coverage: "official_only" | "limited" | "unavailable";
+  warning: string | null;
+}
+
+/** Evidence Pack сессии (GET /api/session/{id}/evidence). */
+export interface EvidencePackData {
+  case_id: string;
+  jurisdiction: string;
+  generated_at: string;
+  legal_issues: string[];
+  sources: LegalSourceCard[];
+  provider_statuses: {
+    provider: string;
+    status: "healthy" | "degraded" | "unavailable" | "not_configured";
+    transport: string | null;
+    checked_at: string;
+    capabilities: string[];
+    message: string | null;
+  }[];
+  warnings: string[];
+  case_law_coverage: CaseLawCoverage | null;
+}
+
+
 
 export interface NormExcerpt {
   title: string;
@@ -213,6 +269,21 @@ export async function fetchReport(sessionId: string): Promise<ReportData> {
     await safeFetch(`${API_BASE}/api/report/${sessionId}?format=json`),
   );
   return response.json();
+}
+
+/** Evidence Pack сессии (этап 3); null — pack ещё не собран. */
+export async function fetchEvidence(
+  sessionId: string,
+): Promise<EvidencePackData | null> {
+  try {
+    const response = await safeFetch(
+      `${API_BASE}/api/session/${sessionId}/evidence`,
+    );
+    if (!response.ok) return null;
+    return response.json();
+  } catch {
+    return null;
+  }
 }
 
 /** Проверка живости бэкенда (индикатор в шапке). */

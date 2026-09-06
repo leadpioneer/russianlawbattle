@@ -1,4 +1,4 @@
-"""FastAPI-бэкенд «Судебного симулятора» (этап 2).
+"""FastAPI-бэкенд «Судебного симулятора» (этап 2 + правовой layer этапа 3).
 
 REST + WebSocket, все данные в памяти (см. session_store.py):
 
@@ -9,7 +9,10 @@ REST + WebSocket, все данные в памяти (см. session_store.py):
 - ``WS   /ws/session/{id}``   — живой поток событий DebateEvent (JSON) + replay;
 - ``GET  /api/report/{id}``   — итоговый отчёт (?format=md|json);
 - ``GET  /api/report/{id}/download`` — скачать markdown-файл отчёта;
-- ``GET  /api/health``        — проверка живости (для install.bat).
+- ``GET  /api/health``        — проверка живости (для install.bat);
+- ``GET  /api/session/{id}/evidence`` — Evidence Pack + статусы провайдеров (этап 3);
+- ``GET  /api/legal/health``  — healthcheck правовых провайдеров (этап 3);
+- ``POST /api/legal/diagnostics`` — диагностика pravo-mcp (этап 3).
 
 CLI (src/main.py) остаётся debug-режимом: оба пути используют один graph.py.
 """
@@ -20,6 +23,7 @@ import asyncio
 import logging
 import os
 from dataclasses import replace
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Literal
 
@@ -32,6 +36,9 @@ from pydantic import BaseModel, Field, field_validator
 
 from .config import Config, DEFAULT_CONFIG_PATH, ENV_FILE
 from .document_loader import SUPPORTED_EXTENSIONS
+from .legal.diagnostics import diagnose
+from .legal.evidence_pack import load_evidence_pack
+from .legal.service import LegalResearchService
 from .session_store import (
     SESSIONS_DIR,
     STATUS_CREATED,
@@ -440,6 +447,53 @@ def report_download(session_id: str) -> FileResponse:
         media_type="text/markdown; charset=utf-8",
         filename=session.report_path.name,
     )
+
+
+# --- Правовой research layer (этап 3, шаг 9) ---------------------------------
+
+
+@app.get("/api/session/{session_id}/evidence")
+def session_evidence(session_id: str) -> dict:
+    """Evidence Pack сессии + статусы провайдеров + покрытие практики.
+
+    Читается из ``sessions/<id>/evidence_pack.json`` (сохраняется узлом
+    ``build_evidence_pack``); если pack ещё не собран — 409.
+    """
+    session = _get_session_or_404(session_id)
+    pack = load_evidence_pack(session.config.project_root)
+    if pack is None:
+        raise HTTPException(
+            status_code=409,
+            detail="Evidence Pack ещё не собран — запустите симуляцию.",
+        )
+    return pack.to_dict()
+
+
+@app.get("/api/legal/health")
+def legal_health() -> dict:
+    """Healthcheck всех правовых провайдеров (без запуска симуляции)."""
+    import asyncio
+
+    service = LegalResearchService()
+    statuses = asyncio.run(service.healthcheck_all())
+    return {
+        "checked_at": datetime.now().isoformat(timespec="seconds"),
+        "providers": [status.to_dict() for status in statuses],
+    }
+
+
+@app.post("/api/legal/diagnostics")
+def legal_diagnostics_endpoint(body: dict | None = None) -> dict:
+    """Полная диагностика правовых источников (шаг 1 этапа 3).
+
+    Тело запроса (опционально): ``{"query": "статья 309 ГК РФ"}``.
+    Возвращает структурированный отчёт диагностики pravo-mcp.
+    """
+    query = "статья 309 ГК РФ"
+    if isinstance(body, dict):
+        query = str(body.get("query") or query)
+    report = diagnose(probe_query=query)
+    return report.to_dict()
 
 
 if __name__ == "__main__":
