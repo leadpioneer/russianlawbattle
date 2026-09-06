@@ -53,9 +53,10 @@ cd web; npm run dev                                                             
 | `src/agents/base.py` | роли, `Statement`, юрисдикция, блок дела | все агенты |
 | `src/agents/*.py` | промпты и генерация реплик | живой прогон (тон текста/маркер судьи) |
 | `src/agents/legal_context.py` | legacy-формирование запросов норм (фасад) | deprecated — не расширяется |
-| `src/graph.py` | LangGraph, узел `build_evidence_pack`, linter, события, `DebateResult` | e2e WebSocket; CLI; отчёт |
+| `src/graph.py` | LangGraph, узел `build_evidence_pack`, linter, события, переквалификация, `DebateResult` | e2e WebSocket; CLI; отчёт; тест `test_graph_e2e` |
+| `src/agents/judge.py` | промпты судьи, маркеры решений (ПРОДОЛЖАТЬ/ЗАВЕРШИТЬ/ПЕРЕКВАЛИФИКАЦИЯ) | парсер-тесты; e2e переквалификации |
 | `src/legal_tools.py` | DEPRECATED-фасад pravo-mcp | не расширяется; снос после шага 6+ |
-| `src/session_store.py` | сессии, статусы, stop, cost_summary | `/api/run`, `/api/stop`, перезапуск stopped |
+| `src/session_store.py` | сессии, статусы, stop, cost_summary, валюта | `/api/run`, `/api/stop`, перезапуск stopped |
 | `src/api.py` | REST/WS, CORS, валидация, evidence/health/diagnostics | e2e-скрипт; `npm run build` (типы) |
 | `src/report.py` | md-отчёт (+ разделы этапа 3, дисклеймер) | полный прогон, открыть `output/verdict_*.md` |
 | `src/legal/models.py` | `LegalSource`/`EvidencePack`/`ProviderHealth`, инварианты верификации | unit-тесты; JSON-roundtrip |
@@ -113,6 +114,32 @@ WS-обработчик в `runDebate` (`page.tsx`), при желании — �
 ### Включить/выключить поиск норм
 `config.yaml` → `legal_mcp: {enabled: false}`. Отключение «тихое» — предупреждений
 в отчёте не будет (в отличие от недоступности сервера).
+
+### Включить/выключить веб-поиск и сменить поисковую модель
+```yaml
+legal_research:
+  web_search: true                       # false — sonar-провайдер не создаётся
+  search_model: "perplexity/sonar-pro-search"  # алиас поисковой модели роутера
+```
+Приоритет алиаса: `search_model` из конфига → env `SONAR_MODEL` → дефолт
+(`perplexity/sonar-pro-search`). Модель обязана поддерживать веб-поиск
+(Perplexity Sonar и аналоги) — обычная chat-модель источники не найдёт.
+Провайдер фильтрует ссылки белым списком официальных доменов
+(`_ALLOWED_URL_HOSTS` в `sonar.py` — расширять при добавлении источников).
+
+### Добавить маркер решения судьи
+`src/agents/judge.py`: вариант в `_JUDGE_MARKER_INSTRUCTION` + ветка в regex
+`_MARKER_RE` + поля `JudgeDecision` + обработка в `parse_judge_decision`. Клиенты:
+`should_continue()` в `graph.py` (переходы + mapping `add_conditional_edges`!),
+событие `judge_decision`, UI в `page.tsx`. Тесты: `test_requalification.py`.
+
+### Добавить провайдера правового исследования
+1. `src/legal/providers/<name>.py` — класс с `name`, `healthcheck()`,
+   `search_statutes()`, `search_case_law()`, `get_document()` (шаблон: `sonar.py` —
+   ленивые креденшелы из конфига, честные `verification_status`, `[]` при ошибке).
+2. Зарегистрировать в `_PROVIDER_REGISTRY` и `default_provider_configs()`
+   (`service.py`).
+3. Unit-тесты на моках; живой прогон; описание в ARCHITECTURE.md.
 
 ### Выделить отдельную модель аналитику (не судье)
 Сейчас аналитик переиспользует роль `judge`. План: добавить роль в `ROLE_TO_MODEL_KEY`

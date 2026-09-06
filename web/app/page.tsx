@@ -1273,7 +1273,7 @@ export default function Home() {
 
       <footer className="mt-8 text-center text-xs text-slate-400 no-print">
         ИИ-инструмент подготовки к спору. Не заменяет консультацию практикующего юриста.
-        <br />v0.4.0
+        <br />v0.5.0
       </footer>
     </main>
   );

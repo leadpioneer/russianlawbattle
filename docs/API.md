@@ -103,7 +103,8 @@ Multipart: `files[]` (PDF/DOCX/TXT/MD) + поле `context` (текст, мож�
     "totals": { "input_tokens": 0, "output_tokens": 0, "cached_tokens": 0,
                 "reasoning_tokens": 0, "total_tokens": 28867 },
     "total_cost_usd": 13.2166,
-    "cost_available": true
+    "cost_available": true,
+    "currency": "RUB"
   },
   "params": {
     "jurisdiction": "…",
@@ -123,7 +124,10 @@ Multipart: `files[]` (PDF/DOCX/TXT/MD) + поле `context` (текст, мож�
 ```
 
 `cost_usd`/`total_cost_usd` = `null`, если роутер не отдал прайсы для модели
-(тогда `cost_available: false` — показываются только токены).
+(тогда `cost_available: false` — показываются только токены). `currency` — валюта
+отображения прайсов: `RUB` (₽) для routerai, иначе `USD` ($); числовые значения
+`*_cost_usd` — в единицах прайсов роутера без конвертации. В `calls` входят и
+вызовы веб-поиска с ролью `legal_research`.
 
 ### `GET /api/report/{session_id}/download`
 Markdown-файл отчёта как вложение. `409`, если отчёта нет.
@@ -180,10 +184,17 @@ Healthcheck всех правовых провайдеров (без запус�
     { "provider": "supreme_court_official", "status": "healthy",
       "transport": "direct_api", "checked_at": "…",
       "capabilities": ["case_law"], "message": "…" },
-    { "provider": "pravo_gov", "status": "healthy", "…": "…" }
+    { "provider": "pravo_gov", "status": "healthy", "…": "…" },
+    { "provider": "sonar_web_search", "status": "healthy",
+      "transport": "web_search", "checked_at": "…",
+      "capabilities": ["statutes", "case_law"],
+      "message": "sonar доступен (…); результаты требуют сверки" }
   ]
 }
 ```
+
+Набор провайдеров зависит от `legal_research.web_search` в config.yaml: при
+`false` провайдер `sonar_web_search` не создаётся.
 
 ### `POST /api/legal/diagnostics`
 Полная диагностика pravo-mcp (шаг 1 этапа 3). Тело опционально:
@@ -210,7 +221,9 @@ Healthcheck всех правовых провайдеров (без запус�
 - На подключении — `{"type": "status", "payload": {"status": "…", "target_side": "…"}}`;
 - далее поток `DebateEvent` в JSON (таблица типов — ARCHITECTURE.md); в этапе 3
   добавлены события `legal_research_started`, `provider_status`,
-  `legal_source_found`, `evidence_pack_ready` (перед прениями);
+  `legal_source_found`, `evidence_pack_ready` (перед прениями); при
+  переквалификации дела судьёй `judge_decision` несёт `payload.requalify` +
+  `payload.requalify_reason`, и блок research-событий повторяется;
 - события буферизуются на сервере: **при переподключении клиент получает их с начала
   (replay)**, затем новые (опрос новых — раз в 0.2 с); несколько клиентов — независимые
   ленты;

@@ -28,6 +28,7 @@
 │    init → build_evidence_pack → claimant_turn               │
 │           → defendant_turn → judge_review                   │
 │    judge_review ─?(ПРОДОЛЖАТЬ и round < max)→ claimant_turn │
+│    judge_review ─?(ПЕРЕКВАЛИФИКАЦИЯ, ≤ 2 раз)→ build_evidence_pack │
 │    judge_review ─?(иначе)─────────────────→ final_verdict   │
 │    final_verdict ─(linter)────────────────→ recommendations │
 │    recommendations ─(linter)──────────────→ END             │
@@ -39,16 +40,17 @@
 │ openai SDK (streaming) │   │   этап 3)                                  │
 │ usage из стрима        │   │  service.py — оркестрация провайдеров      │
 │ прайсы из GET /models  │   │  providers/pravo_gov.py — реквизиты актов  │
-│ citation_verifier.py   │   │  providers/supreme_court.py — Пленум ВС    │
+│ log_external_usage()   │   │  providers/supreme_court.py — Пленум ВС    │
+│ citation_verifier.py   │   │  providers/sonar.py — веб-поиск (роутер)   │
 │ (linter ссылок)        │   │  converters.py — тексты статей (markitdown)│
 └───────┬────────────────┘   │  case_law.py — user-акты, coverage         │
         │                    │  evidence_pack.py, prompts.py, models.py   │
-        │                    └───────┬────────────────────┬───────────────┘
-        │                            │ HTTP               │ HTTP
-        │                    ┌───────▼────────┐   ┌───────▼─────────────┐
-        │                    │ publication.   │   │ www.vsrf.ru         │
-        │                    │ pravo.gov.ru   │   │ (Пленум, обзоры)    │
-        │                    └───────┬────────┘   └─────────────────────┘
+        │                    └───────┬──────────┬──────────┬──────────────┘
+        │                            │ HTTP     │ HTTP     │ [OI] chat
+        │                    ┌───────▼────────┐ ┌─────▼─────┐ ┌──▼─────────────┐
+        │                    │ publication.   │ │ www.vsrf.ru│ │ поисковая модель│
+        │                    │ pravo.gov.ru   │ │ (Пленум)   │ │ (sonar) роутера│
+        │                    └───────┬────────┘ └────────────┘ └────────────────┘
         │                            │ (тексты статей — markitdown)
         │                    ┌───────▼────────┐
         │                    │ КонсультантПлюс│  (неофициальный текст, помечается)
@@ -71,32 +73,49 @@
 | Узел | Делает | Возвращает |
 |---|---|---|
 | `init` | Загружает материалы дела (кэш по `project_root`) | `cfg, materials, round_number=0` |
-| `build_evidence_pack` | **Этап 3**: вопросы дела → провайдеры → Evidence Pack + событие | `legal_issues, evidence_pack, evidence_block` |
+| `build_evidence_pack` | **Этап 3**: вопросы дела → провайдеры → Evidence Pack + события; при переквалификации — повторный сбор | `legal_issues, evidence_pack, evidence_block, research_runs` |
 | `claimant_turn` | Реплика юриста заявителя (с общим Evidence Pack) | `history+, round_number, norms_used+, legal_warnings+` |
 | `defendant_turn` | Реплика юриста ответчика (с общим Evidence Pack) | `history+, norms_used+, legal_warnings+` |
-| `judge_review` | Оценка раунда + маркер решения | `history+, judge_decision` |
-| `final_verdict` | Итоговое решение + linter ссылок | `verdict, norms_used+, citation_results+` |
-| `recommendations` | Рекомендации для target_side + linter | `recommendations, citation_results+` |
+| `judge_review` | Оценка раунда + маркер решения (в т.ч. переквалификация) | `history+, judge_decision, requalifications+` |
+| `final_verdict` | Итоговое решение + linter ссылок | `verdict, norms_used+, legal_warnings+, citation_results+` |
+| `recommendations` | Рекомендации для target_side + linter | `recommendations, legal_warnings+, citation_results+` |
 
-Evidence Pack собирается **один раз до прений** и передаётся всем трём ролям
-(каждая интерпретирует его в интересах своей стороны). До этапа 3 каждый узел
-сам формулировал запросы норм через MCP (4 лишних LLM-вызова за прогон) —
-это заменено единым узлом `build_evidence_pack`.
-| `final_verdict` | Итоговое мотивированное решение | `verdict, norms_used+, legal_warnings+` |
-| `recommendations` | Блок рекомендаций для `target_side` | `recommendations, norms_used+, legal_warnings+` |
+Evidence Pack собирается **до прений** (и повторно при переквалификации — см. ниже)
+и передаётся всем трём ролям (каждая интерпретирует его в интересах своей стороны).
+До этапа 3 каждый узел сам формулировал запросы норм через MCP (4 лишних LLM-вызова
+за прогон) — это заменено единым узлом `build_evidence_pack`.
 
-Условный переход после судьи — `should_continue()`: `judge_decision.continues=False` или
-`round_number >= max_rounds` → `final_verdict`; иначе → `claimant_turn`; если сессия
-остановлена (`state["stopped"]`) → `END`. **Важно**: `END` должен присутствовать в mapping
-`add_conditional_edges`, иначе LangGraph бросает `KeyError: '__end__'` (уже ловили).
+Условный переход после судьи — `should_continue()`, приоритет проверок:
+1. `state["stopped"]` → `END`;
+2. `judge_decision.requalify` **и** `research_runs <= MAX_REQUALIFICATIONS` (=2) →
+   `build_evidence_pack` (переквалификация дела — нормативная база собирается заново);
+3. `judge_decision.continues=False` или `round_number >= max_rounds` → `final_verdict`;
+4. иначе → `claimant_turn`.
+**Важно**: все цели перехода (включая `END` и `build_evidence_pack`) должны
+присутствовать в mapping `add_conditional_edges`, иначе LangGraph бросает
+`KeyError` (уже ловили дважды).
+
+### Переквалификация дела
+
+Судья может объявить маркером `=== РЕШЕНИЕ СУДЬИ: ПЕРЕКВАЛИФИКАЦИЯ: <новый характер
+спора> ===`, если в прениях выяснилось, что характер спора изменился (пример из
+промпта: товар использовался для извлечения коммерческой прибыли, а не личных нужд →
+ЗоЗПП неприменим). Граф возвращается в `build_evidence_pack`: запрос расширяется
+причиной переквалификации и последними репликами, Evidence Pack пересобирается
+(ключи `evidence_pack`/`evidence_block` перезаписываются), прения продолжаются
+в рамках `max_rounds`. Причины накапливаются в `requalifications` (reducer
+`operator.add`) и попадают в `DebateResult.requalifications`/`research_runs` →
+строку в отчёте. Лимит `MAX_REQUALIFICATIONS = 2` защищает от цикла
+research → прения → research.
 
 ### Решение судьи — строковый маркер
 
 Вместо structured output / function calling судья в конце ответа ставит строку
-`=== РЕШЕНИЕ СУДЬИ: ПРОДОЛЖАТЬ (кому: …) ===` или `=== … ЗАВЕРШИТЬ ===`, которую парсит
-`parse_judge_decision()` (regex; fallback: маркера нет → «продолжать, вопрос обеим»).
-Почему так: cheap-модели (GLM, Qwen) надёжно копируют текстовый шаблон и ненадёжно
-соблюдают JSON-схемы в streaming-режиме; маркер дёшев и детерминирован.
+`=== РЕШЕНИЕ СУДЬИ: ПРОДОЛЖАТЬ (кому: …) ===`, `=== … ЗАВЕРШИТЬ ===` или
+`=== … ПЕРЕКВАЛИФИКАЦИЯ: <описание> ===`, которую парсит `parse_judge_decision()`
+(regex; fallback: маркера нет → «продолжать, вопрос обеим»). Почему так: cheap-модели
+(GLM, Qwen) надёжно копируют текстовый шаблон и ненадёжно соблюдают JSON-схемы
+в streaming-режиме; маркер дёшев и детерминирован.
 
 ### Кооперативная остановка
 
@@ -117,7 +136,7 @@ continues, addressee, payload`; `as_dict()` отдаёт словарь без `
 | `agent_start` | Узел начинает реплику | role, speaker_title, round, **model** | WS: пузырь «печатает…»; CLI: заголовок |
 | `delta` | Фрагмент стрима | role, round, text | WS: append к тексту; CLI: stdout |
 | `agent_end` | Реплика готова | role, round, **text (полный)**, payload.usage | WS: замена текста, токены в счётчик |
-| `judge_decision` | Маркер разобран | continues, addressee | WS: плашка ПРОДОЛЖАТЬ/ЗАВЕРШИТЬ |
+| `judge_decision` | Маркер разобран | continues, addressee, **payload.requalify, payload.requalify_reason** | WS: плашка ПРОДОЛЖАТЬ/ЗАВЕРШИТЬ/ПЕРЕКВАЛИФИКАЦИЯ |
 | `verdict_done` | Вердикт готов | payload: length, usage | служебное |
 | `recommendations_done` | Рекомендации готовы | payload: target_side, prospects | служебное |
 | `debate_done` | Граф дошёл до конца | payload: rounds_played, finished_by_judge, statements, verdict_length, recommendations_prospects, **stopped**, **usage_log[]** | WS: close; CLI: итог |
@@ -132,6 +151,9 @@ provider_status×N → legal_source_found×N → evidence_pack_ready →
 agent_start(claimant) → delta×N → agent_end(claimant) → …(defendant)… →
 judge_decision → …(вердикт)… → verdict_done → …(аналитик)… →
 recommendations_done → debate_done`.
+При переквалификации после `judge_decision` блок `legal_research_started → … →
+evidence_pack_ready` повторяется, затем прения продолжаются; UI показывает баннер
+«Идёт подготовка законодательной базы» при каждом проходе research.
 
 ## Жизненный цикл сессии
 
@@ -165,6 +187,14 @@ created ──upload──▶ ready ──run──▶ running ──┬─ ус
 Деньги: `fetch_model_pricing(base_url, api_key)` — `GET /models`, поле `pricing`
 (`prompt`/`completion`/`input_cache_read` — USD **за токен**), кэш 1 час.
 `estimate_cost = (input − cached)·prompt + cached·cache_read + output·completion`.
+Валюта отображения: `currency_for_base_url()` — подстрока `routerai` в адресе
+роутера → RUB (символ ₽), иначе USD ($); поле `currency` в `cost_summary`
+(и символ в UI, и в таблице отчёта). Числовые поля `*_cost_usd` остались
+в прежних единицах прайсов роутера — конвертация не выполняется.
+
+Веб-поиск (`sonar`) логирует потребление через `log_external_usage()` с ролью
+`legal_research` — эти вызовы видны в таблице «Потребление ресурсов» и входят
+в `cost_summary`, хотя идут мимо ролевых `chat()`.
 
 `chat()` возвращает `LlmResult` — **наследник `str`** с полем `usage`: все места, работающие
 с текстом реплик (`.strip()`, парсинг, конкатенация), не изменились. `dataclass` поверх
