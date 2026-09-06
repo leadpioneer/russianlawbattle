@@ -69,6 +69,21 @@ export interface ReportData {
   recommendations: Recommendation | null;
 }
 
+export interface DefaultsData {
+  config_found: boolean;
+  base_url: string;
+  model_claimant_lawyer: string;
+  model_defendant_lawyer: string;
+  model_judge: string;
+  jurisdiction: string;
+  max_rounds: number;
+  max_context_tokens: number;
+  llm_params: Record<string, unknown>;
+  api_key_env: string;
+  has_env_key: boolean;
+  api_key_masked: string;
+}
+
 async function ensureOk(response: Response): Promise<Response> {
   if (!response.ok) {
     let detail = response.statusText;
@@ -81,6 +96,11 @@ async function ensureOk(response: Response): Promise<Response> {
     throw new Error(detail);
   }
   return response;
+}
+
+export async function fetchDefaults(): Promise<DefaultsData> {
+  const response = await ensureOk(await fetch(`${API_BASE}/api/defaults`));
+  return response.json();
 }
 
 export async function createSession(payload: SetupPayload): Promise<string> {

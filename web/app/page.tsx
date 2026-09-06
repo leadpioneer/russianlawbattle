@@ -1,15 +1,38 @@
 "use client";
 
-import { useCallback, useRef, useState } from "react";
-import type { DebateEvent, TargetSide } from "@/lib/api";
+import { useCallback, useEffect, useRef, useState } from "react";
+import type { DebateEvent, DefaultsData, TargetSide } from "@/lib/api";
 import {
   connectSessionSocket,
   createSession,
+  fetchDefaults,
   fetchReport,
   reportDownloadUrl,
   startRun,
   uploadCase,
 } from "@/lib/api";
+
+/** Ключ localStorage с настройками формы (восстанавливаются при следующем открытии). */
+const SETTINGS_KEY = "court-sim-settings-v1";
+
+interface SavedSettings {
+  baseUrl: string;
+  modelClaimant: string;
+  modelDefendant: string;
+  modelJudge: string;
+  jurisdiction: string;
+  maxRounds: number;
+  targetSide: TargetSide;
+}
+
+function loadSavedSettings(): SavedSettings | null {
+  try {
+    const raw = window.localStorage.getItem(SETTINGS_KEY);
+    return raw ? (JSON.parse(raw) as SavedSettings) : null;
+  } catch {
+    return null;
+  }
+}
 
 /** Пресеты моделей — дешёвые для черновиков, сильные для финала. */
 const MODEL_PRESETS: { label: string; value: string }[] = [
@@ -88,6 +111,11 @@ export default function Home() {
   const [jurisdiction, setJurisdiction] = useState(JURISDICTIONS[3]);
   const [maxRounds, setMaxRounds] = useState(2);
   const [targetSide, setTargetSide] = useState<TargetSide>("claimant");
+  // Умный режим: преднастройки из config.yaml/.env (карточка вместо формы).
+  const [configDefaults, setConfigDefaults] = useState<DefaultsData | null>(null);
+  const [showFullForm, setShowFullForm] = useState(false);
+  const [defaultsLoaded, setDefaultsLoaded] = useState(false);
+  const [clientFileError, setClientFileError] = useState<string | null>(null);
 
   // --- загрузка дела ---
   const [files, setFiles] = useState<File[]>([]);
@@ -100,6 +128,7 @@ export default function Home() {
   const [typing, setTyping] = useState(false);
   const feedRef = useRef<HTMLDivElement>(null);
   const nextId = useRef(1);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   // --- итог ---
   const [report, setReport] = useState<Awaited<ReturnType<typeof fetchReport>> | null>(null);
@@ -110,6 +139,50 @@ export default function Home() {
       if (feedRef.current) feedRef.current.scrollTop = feedRef.current.scrollHeight;
     });
   }, []);
+
+  // При открытии страницы: преднастройки из config.yaml/.env + сохранённая форма.
+  useEffect(() => {
+    let cancelled = false;
+    fetchDefaults()
+      .then((defaults) => {
+        if (cancelled) return;
+        setConfigDefaults(defaults);
+        const saved = loadSavedSettings();
+        if (saved) {
+          setBaseUrl(saved.baseUrl);
+          setModelClaimant(saved.modelClaimant);
+          setModelDefendant(saved.modelDefendant);
+          setModelJudge(saved.modelJudge);
+          setJurisdiction(saved.jurisdiction);
+          setMaxRounds(saved.maxRounds);
+          setTargetSide(saved.targetSide);
+        } else if (defaults.config_found && defaults.base_url) {
+          setBaseUrl(defaults.base_url);
+          if (defaults.model_claimant_lawyer) setModelClaimant(defaults.model_claimant_lawyer);
+          if (defaults.model_defendant_lawyer) setModelDefendant(defaults.model_defendant_lawyer);
+          if (defaults.model_judge) setModelJudge(defaults.model_judge);
+          if (defaults.jurisdiction) setJurisdiction(defaults.jurisdiction);
+          setMaxRounds(defaults.max_rounds);
+        }
+        setDefaultsLoaded(true);
+      })
+      .catch(() => !cancelled && setDefaultsLoaded(true));
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  /** Компактный режим доступен, если конфиг полон и ключ есть в .env. */
+  const compactConfigAvailable =
+    !!configDefaults &&
+    configDefaults.config_found &&
+    !!configDefaults.base_url &&
+    !!configDefaults.model_claimant_lawyer &&
+    !!configDefaults.model_defendant_lawyer &&
+    !!configDefaults.model_judge &&
+    configDefaults.has_env_key;
+
+  const canStart = files.length > 0 || context.trim().length > 0;
 
   const runDebate = useCallback(
     async (sessionId: string) => {
@@ -188,10 +261,45 @@ export default function Home() {
     [scrollFeed],
   );
 
+  /** Добавить файлы (drag-and-drop или проводник) с клиентской фильтрацией. */
+  const addFiles = useCallback((incoming: FileList | File[]) => {
+    const allowed = [".pdf", ".docx", ".txt", ".md"];
+    const skipped: string[] = [];
+    setFiles((prev) => {
+      const seen = new Set(prev.map((file) => `${file.name}:${file.size}`));
+      const next = [...prev];
+      for (const file of Array.from(incoming)) {
+        const name = file.name.toLowerCase();
+        if (!allowed.some((ext) => name.endsWith(ext))) {
+          skipped.push(file.name);
+          continue;
+        }
+        const key = `${file.name}:${file.size}`;
+        if (seen.has(key)) continue; // дедуп: тот же файл дважды
+        seen.add(key);
+        next.push(file);
+      }
+      return next;
+    });
+    setClientFileError(
+      skipped.length ? `Пропущены неподдерживаемые файлы: ${skipped.join(", ")}` : null,
+    );
+  }, []);
+
   const handleSetup = useCallback(async () => {
     setBusy(true);
     setError(null);
     try {
+      const settings: SavedSettings = {
+        baseUrl,
+        modelClaimant,
+        modelDefendant,
+        modelJudge,
+        jurisdiction,
+        maxRounds,
+        targetSide,
+      };
+      window.localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
       sessionIdRef.current = await createSession({
         base_url: baseUrl,
         api_key: apiKey,
@@ -201,7 +309,7 @@ export default function Home() {
         jurisdiction,
         max_rounds: maxRounds,
         target_side: targetSide,
-        llm_params: { reasoning: { effort: "low" } },
+        llm_params: configDefaults?.llm_params ?? { reasoning: { effort: "low" } },
       });
       setStage("upload");
     } catch (err) {
@@ -209,7 +317,7 @@ export default function Home() {
     } finally {
       setBusy(false);
     }
-  }, [baseUrl, apiKey, modelClaimant, modelDefendant, modelJudge, jurisdiction, maxRounds, targetSide]);
+  }, [baseUrl, apiKey, modelClaimant, modelDefendant, modelJudge, jurisdiction, maxRounds, targetSide, configDefaults]);
 
   const handleUpload = useCallback(async () => {
     const sessionId = sessionIdRef.current;
@@ -281,8 +389,94 @@ export default function Home() {
       {stage === "setup" && (
         <section className="rounded-xl border border-slate-200 bg-white p-6 shadow-sm">
           <h2 className="mb-1 text-lg font-semibold">Настройка</h2>
+          {compactConfigAvailable && !showFullForm && (
+            <div className="mt-3">
+              <p className="mb-5 text-sm text-slate-500">
+                Конфигурация загружена из config.yaml и .env — можно сразу переходить к делу.
+              </p>
+              <div className="mb-5 space-y-2 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-4 text-sm">
+                <div className="flex flex-wrap justify-between gap-2">
+                  <span className="text-slate-600">Роутер</span>
+                  <span className="font-mono text-xs">{configDefaults!.base_url}</span>
+                </div>
+                <div className="flex flex-wrap justify-between gap-2">
+                  <span className="text-slate-600">Модели (заявитель / ответчик / судья)</span>
+                  <span className="font-mono text-xs">
+                    {configDefaults!.model_claimant_lawyer === configDefaults!.model_defendant_lawyer &&
+                    configDefaults!.model_claimant_lawyer === configDefaults!.model_judge
+                      ? configDefaults!.model_claimant_lawyer
+                      : `${configDefaults!.model_claimant_lawyer} / ${configDefaults!.model_defendant_lawyer} / ${configDefaults!.model_judge}`}
+                  </span>
+                </div>
+                <div className="flex flex-wrap justify-between gap-2">
+                  <span className="text-slate-600">Юрисдикция</span>
+                  <span>{configDefaults!.jurisdiction}</span>
+                </div>
+                <div className="flex flex-wrap justify-between gap-2">
+                  <span className="text-slate-600">Ключ API</span>
+                  <span className="font-mono text-xs">
+                    из .env ({configDefaults!.api_key_env}): {configDefaults!.api_key_masked}
+                  </span>
+                </div>
+              </div>
+              <div className="mb-4 grid gap-4 sm:grid-cols-2">
+                <label className="text-sm">
+                  <span className="mb-1 block font-medium">Раундов прений (максимум)</span>
+                  <input
+                    type="number"
+                    min={1}
+                    max={10}
+                    className="w-full rounded-lg border border-slate-300 px-3 py-2"
+                    value={maxRounds}
+                    onChange={(e) => setMaxRounds(Math.min(10, Math.max(1, Number(e.target.value) || 1)))}
+                  />
+                </label>
+                <div className="text-sm">
+                  <span className="mb-1 block font-medium">Рекомендации для стороны</span>
+                  <div className="flex gap-3">
+                    {(
+                      [
+                        ["claimant", "Заявителя"],
+                        ["defendant", "Ответчика"],
+                      ] as [TargetSide, string][]
+                    ).map(([side, label]) => (
+                      <button
+                        key={side}
+                        type="button"
+                        onClick={() => setTargetSide(side)}
+                        className={`flex-1 rounded-lg border px-3 py-2 transition ${
+                          targetSide === side
+                            ? "border-blue-600 bg-blue-50 font-semibold text-blue-800"
+                            : "border-slate-300 bg-white hover:bg-slate-50"
+                        }`}
+                      >
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowFullForm(true)}
+                className="text-sm font-medium text-blue-600 hover:underline"
+              >
+                Изменить конфигурацию вручную
+              </button>
+              <button
+                type="button"
+                disabled={busy || !defaultsLoaded}
+                onClick={handleSetup}
+                className="mt-4 w-full rounded-lg bg-blue-600 px-4 py-2.5 font-semibold text-white transition hover:bg-blue-700 disabled:opacity-50"
+              >
+                {busy ? "Создаю сессию…" : "Дальше: загрузить дело"}
+              </button>
+            </div>
+          )}
+          {!(compactConfigAvailable && !showFullForm) && (
+          <>
           <p className="mb-5 text-sm text-slate-500">
-            Роутер, модели агентов и юрисдикция. Ключ API хранится только в этой сессии браузера.
+            Роутер, модели агентов и юрисдикция. Ключ можно не вводить — он подставится из .env.
           </p>
           <div className="grid gap-4 sm:grid-cols-2">
             <label className="text-sm sm:col-span-2">
@@ -295,13 +489,20 @@ export default function Home() {
               />
             </label>
             <label className="text-sm">
-              <span className="mb-1 block font-medium">Ключ API</span>
+              <span className="mb-1 block font-medium">
+                Ключ API
+                {configDefaults?.has_env_key && (
+                  <span className="ml-2 font-normal text-emerald-700">
+                    есть в .env ({configDefaults.api_key_masked}) — можно оставить пустым
+                  </span>
+                )}
+              </span>
               <input
                 type="password"
                 className="w-full rounded-lg border border-slate-300 px-3 py-2"
                 value={apiKey}
                 onChange={(e) => setApiKey(e.target.value)}
-                placeholder="sk-…"
+                placeholder={configDefaults?.has_env_key ? "используется ключ из .env" : "sk-…"}
               />
             </label>
             <label className="text-sm">
@@ -387,6 +588,8 @@ export default function Home() {
           >
             {busy ? "Создаю сессию…" : "Дальше: загрузить дело"}
           </button>
+          </>
+          )}
         </section>
       )}
 
@@ -407,7 +610,7 @@ export default function Home() {
             onDrop={(e) => {
               e.preventDefault();
               setDragOver(false);
-              setFiles((prev) => [...prev, ...Array.from(e.dataTransfer.files)]);
+              addFiles(e.dataTransfer.files);
             }}
             className={`mb-4 rounded-xl border-2 border-dashed px-6 py-10 text-center transition ${
               dragOver ? "border-blue-500 bg-blue-50" : "border-slate-300 bg-slate-50"
@@ -415,19 +618,27 @@ export default function Home() {
           >
             <p className="font-medium">Перетащите файлы сюда</p>
             <p className="mt-1 text-sm text-slate-500">PDF · DOCX · TXT · MD</p>
-            <label className="mt-3 inline-block cursor-pointer text-sm font-medium text-blue-600 hover:underline">
+            <button
+              type="button"
+              onClick={() => fileInputRef.current?.click()}
+              className="mt-3 text-sm font-medium text-blue-600 hover:underline"
+            >
               или выберите на диске
-              <input
-                type="file"
-                multiple
-                accept=".pdf,.docx,.txt,.md"
-                className="hidden"
-                onChange={(e) => {
-                  setFiles((prev) => [...prev, ...Array.from(e.target.files ?? [])]);
-                  e.target.value = "";
-                }}
-              />
-            </label>
+            </button>
+            <input
+              ref={fileInputRef}
+              type="file"
+              multiple
+              accept=".pdf,.docx,.txt,.md"
+              className="hidden"
+              onChange={(e) => {
+                if (e.target.files) addFiles(e.target.files);
+                e.target.value = "";
+              }}
+            />
+            {clientFileError && (
+              <p className="mt-3 text-sm text-red-600">{clientFileError}</p>
+            )}
             {files.length > 0 && (
               <ul className="mt-4 flex flex-wrap justify-center gap-2 text-xs">
                 {files.map((file, index) => (
@@ -459,13 +670,28 @@ export default function Home() {
             />
           </label>
           {uploadSummary && <p className="mt-3 text-sm text-emerald-700">{uploadSummary}</p>}
+          {clientFileError && !files.length && (
+            <p className="mb-3 text-sm text-red-600">{clientFileError}</p>
+          )}
           <button
             type="button"
-            disabled={busy}
+            disabled={busy || !canStart}
             onClick={handleUpload}
             className="mt-6 w-full rounded-lg bg-blue-600 px-4 py-2.5 font-semibold text-white transition hover:bg-blue-700 disabled:opacity-50"
           >
             {busy ? "Запускаю прения…" : "Начать прения"}
+          </button>
+          {!canStart && (
+            <p className="mt-2 text-center text-xs text-slate-400">
+              Загрузите хотя бы один документ или опишите ситуацию текстом
+            </p>
+          )}
+          <button
+            type="button"
+            onClick={() => setStage("setup")}
+            className="mt-3 w-full rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-600 hover:bg-slate-50"
+          >
+            ← Назад к настройке
           </button>
         </section>
       )}

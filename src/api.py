@@ -18,15 +18,19 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Literal
 
+import yaml
+from dotenv import load_dotenv
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, PlainTextResponse
 from pydantic import BaseModel, Field, field_validator
 
-from .config import Config
+from .config import Config, DEFAULT_CONFIG_PATH, ENV_FILE
 from .document_loader import SUPPORTED_EXTENSIONS
 from .session_store import (
     SESSIONS_DIR,
@@ -53,6 +57,73 @@ app.add_middleware(
 )
 
 store = SessionStore()
+
+
+# --- преднастройки из config.yaml/.env (для умной формы веб-интерфейса) ------
+
+def _read_raw_config() -> dict[str, Any]:
+    """Прочитать config.yaml без строгой валидации (для преднастроек формы)."""
+    if not DEFAULT_CONFIG_PATH.is_file():
+        return {}
+    try:
+        raw = yaml.safe_load(DEFAULT_CONFIG_PATH.read_text(encoding="utf-8-sig")) or {}
+        return raw if isinstance(raw, dict) else {}
+    except yaml.YAMLError:
+        return {}
+
+
+def _mask_key(key: str) -> str:
+    """Маска ключа для показа в интерфейсе (полный ключ не покидает бэкенд)."""
+    if not key:
+        return ""
+    if len(key) <= 10:
+        return "***"
+    return f"{key[:6]}…{key[-4:]}"
+
+
+def _env_key() -> tuple[str, str]:
+    """Имя переменной окружения с ключом и её значение (из .env/config.yaml)."""
+    load_dotenv(ENV_FILE)  # секреты; уже установленные переменные не трогаем
+    env_name = _read_raw_config().get("api_key_env")
+    env_name = env_name if isinstance(env_name, str) and env_name.strip() else "OPENAI_API_KEY"
+    return env_name.strip(), os.environ.get(env_name, "").strip()
+
+
+class DefaultsResponse(BaseModel):
+    config_found: bool
+    base_url: str = ""
+    model_claimant_lawyer: str = ""
+    model_defendant_lawyer: str = ""
+    model_judge: str = ""
+    jurisdiction: str = ""
+    max_rounds: int = 3
+    max_context_tokens: int = 12_000
+    llm_params: dict[str, Any] = Field(default_factory=dict)
+    api_key_env: str = ""
+    has_env_key: bool = False
+    api_key_masked: str = ""
+
+
+@app.get("/api/defaults")
+def defaults() -> DefaultsResponse:
+    """Преднастройки из config.yaml/.env: веб-форма подставляет их автоматически."""
+    load_dotenv(ENV_FILE)
+    raw = _read_raw_config()
+    env_name, env_key = _env_key()
+    return DefaultsResponse(
+        config_found=bool(raw),
+        base_url=str(raw.get("api_base_url", "") or ""),
+        model_claimant_lawyer=str(raw.get("model_claimant_lawyer", "") or ""),
+        model_defendant_lawyer=str(raw.get("model_defendant_lawyer", "") or ""),
+        model_judge=str(raw.get("model_judge", "") or ""),
+        jurisdiction=str(raw.get("jurisdiction", "") or ""),
+        max_rounds=int(raw.get("max_rounds", 3) or 3),
+        max_context_tokens=int(raw.get("max_context_tokens", 12_000) or 12_000),
+        llm_params=raw.get("llm_params") if isinstance(raw.get("llm_params"), dict) else {},
+        api_key_env=env_name,
+        has_env_key=bool(env_key),
+        api_key_masked=_mask_key(env_key),
+    )
 
 
 # --- модели запросов ---------------------------------------------------------
@@ -125,10 +196,27 @@ def setup(request: SetupRequest) -> dict:
         return _build_config(request, session_dir)
 
     session = store.create(target_side=request.target_side, config_factory=config_factory)
+    # Ключ не введён в форме — пробуем взять из .env (как это делает CLI-режим).
+    if not session.config.api_key:
+        env_name, env_key = _env_key()
+        if env_key:
+            session.config = replace(
+                session.config, api_key=env_key, api_key_source=f"env:{env_name}"
+            )
+            logger.info("Сессия %s: ключ API взят из %s.", session.id, env_name)
+    if not session.config.api_key:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Ключ API не задан ни в форме, ни в .env. Укажите ключ в веб-форме "
+                f"или положите его в .env (переменная {_env_key()[0]!r})."
+            ),
+        )
     return {
         "session_id": session.id,
         "status": session.status,
         "target_side": session.target_side,
+        "api_key_source": session.config.api_key_source,
     }
 
 
@@ -197,10 +285,32 @@ def run_debate_endpoint(session_id: str) -> dict:
             status_code=400, detail="Ключ API не задан: повторите настройку (POST /api/setup)."
         )
     if not session.config.case_context_file.exists():
-        raise HTTPException(
-            status_code=400,
-            detail="Материалы дела не загружены: вызовите POST /api/upload/{session_id}.",
+        # Контекста нет, но документы загружены — генерируем служебный контекст:
+        # агенты получат перечень файлов и будут опираться на их содержимое.
+        case_dir = session.config.case_files_dir
+        documents = (
+            sorted(path.name for path in case_dir.iterdir() if path.is_file() and path.name != ".gitkeep")
+            if case_dir.is_dir()
+            else []
         )
+        if not documents:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Материалы дела пусты: загрузите документы (PDF/DOCX/TXT/MD) "
+                    "или опишите ситуацию текстом на шаге «Загрузка дела»."
+                ),
+            )
+        listing = "\n".join(f"- case_files/{name}" for name in documents)
+        session.config.case_context_file.write_text(
+            "# Контекст дела\n\n"
+            "Пользователь не описал ситуацию текстом — единственный источник фактов — "
+            "загруженные документы ниже. Опирайтесь исключительно на их содержимое.\n\n"
+            "Загруженные документы:\n"
+            f"{listing}\n",
+            encoding="utf-8",
+        )
+        logger.info("Сессия %s: контекст дела сгенерирован из %d документов.", session_id, len(documents))
     run_session_in_thread(session)
     return {"session_id": session.id, "status": session.status}
 
