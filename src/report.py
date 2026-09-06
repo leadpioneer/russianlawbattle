@@ -43,6 +43,11 @@ def render_report(result: DebateResult, generated_at: datetime | None = None) ->
     if cfg.llm_params:
         lines.append(f"- **Доп. параметры запросов:** `{cfg.llm_params}`")
     lines.append(f"- **Сторона для рекомендаций:** {result.target_side}")
+    if result.legal_warning:
+        lines.append(
+            f"- **⚠ Предупреждение:** {result.legal_warning} — ссылки модели на нормы "
+            "требуют проверки."
+        )
 
     lines += [
         "",
@@ -66,6 +71,11 @@ def render_report(result: DebateResult, generated_at: datetime | None = None) ->
         lines += [f"#### {statement.speaker_title}", "", statement.text.strip(), ""]
 
     lines += ["## Итоговое решение судьи", "", result.verdict.strip(), ""]
+
+    if result.verified_norms:
+        lines += ["## Подтверждённые нормы права (pravo.gov.ru)", ""]
+        lines += [f"- {norm.title} [{norm.source_url}]" for norm in result.verified_norms]
+        lines.append("")
 
     if result.recommendations is not None:
         rec = result.recommendations

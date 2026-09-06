@@ -110,6 +110,7 @@ def generate_recommendations(
     verdict: str,
     target_side: str,
     *,
+    norms_block: str = "",
     on_delta: DeltaCallback | None = None,
 ) -> Recommendation:
     """Сформировать блок рекомендаций для стороны ``target_side`` по итогам прений."""
@@ -125,9 +126,12 @@ def generate_recommendations(
         "строго по структуре из инструкции."
     )
     logger.info("Агент «%s» готовит рекомендации (target_side=%s).", ADVISOR_TITLE, target_side)
+    system_prompt = build_system_prompt(cfg, materials, target_side)
+    if norms_block:
+        system_prompt += f"\n\n{norms_block}"
     text = chat(
         ROLE_JUDGE,
-        build_system_prompt(cfg, materials, target_side),
+        system_prompt,
         [{"role": "user", "content": user_prompt}],
         temperature=0.3,
         on_delta=on_delta,

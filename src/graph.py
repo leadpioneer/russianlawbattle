@@ -31,6 +31,8 @@ from langgraph.graph import END, START, StateGraph
 from .agents import advisor, claimant_lawyer, defendant_lawyer
 from .agents import judge as judge_agent
 from .agents.base import ROLE_CLAIMANT, ROLE_DEFENDANT, ROLE_JUDGE, SPEAKER_TITLES, Statement
+from .agents.legal_context import VerifiedNorms, build_verified_norms
+from .legal_tools import LawExcerpt
 from .config import Config, load_config
 from .document_loader import CaseMaterials, load_case
 from .llm_client import reset_clients, set_config
@@ -91,6 +93,16 @@ NODE_VERDICT = "final_verdict"
 NODE_RECOMMENDATIONS = "recommendations"
 
 
+def _norms_warning(norms: VerifiedNorms, role: str, round_number: int) -> list[str]:
+    """Предупреждение в состояние графа, если нормы не удалось подтвердить."""
+    if not norms.degraded:
+        return []
+    return [
+        f"раунд {round_number}, {SPEAKER_TITLES.get(role, role)}: нормы права не подтверждены "
+        "внешним источником (MCP pravo.gov.ru недоступен или не дал результатов)"
+    ]
+
+
 class DebateState(TypedDict, total=False):
     """Состояние процесса (in-memory, узлы возвращают частичные обновления)."""
 
@@ -102,6 +114,8 @@ class DebateState(TypedDict, total=False):
     verdict: str
     target_side: str  # чья сторона нужна для рекомендаций: claimant | defendant
     recommendations: advisor.Recommendation | None  # блок рекомендаций (последний узел)
+    norms_used: Annotated[list[LawExcerpt], operator.add]  # подтверждённые нормы за прогон
+    legal_warnings: Annotated[list[str], operator.add]  # предупреждения о неподтверждённых нормах
 
 
 @dataclass(frozen=True)
@@ -116,6 +130,8 @@ class DebateResult:
     finished_by_judge: bool  # True — судья решил ЗАВЕРШИТЬ; False — достигнут max_rounds
     target_side: str = "claimant"  # сторона, для которой готовились рекомендации
     recommendations: advisor.Recommendation | None = None  # блок рекомендаций (после вердикта)
+    verified_norms: tuple[LawExcerpt, ...] = ()  # дедуплицированные нормы за весь прогон
+    legal_warning: str | None = None  # предупреждение о неподтверждённых нормах (в отчёт)
 
 
 def build_graph(
@@ -165,11 +181,18 @@ def build_graph(
                 model=cfg.model_for(ROLE_CLAIMANT),
             )
         )
+        norms = build_verified_norms(
+            state["cfg"],
+            state["materials"],
+            ROLE_CLAIMANT,
+            f"позиция заявителя (раунд {round_number} прений)",
+        )
         statement = claimant_lawyer.make_statement(
             state["cfg"],
             state["materials"],
             round_number,
             state.get("history", []),
+            norms_block=norms.block,
             on_delta=lambda chunk: emit(
                 DebateEvent(EVENT_DELTA, role=ROLE_CLAIMANT, round=round_number, text=chunk)
             ),
@@ -184,7 +207,12 @@ def build_graph(
             )
         )
         logger.info("Узел %s: реплика %d симв. (раунд %d).", NODE_CLAIMANT, len(statement.text), round_number)
-        return {"history": [statement], "round_number": round_number}
+        return {
+            "history": [statement],
+            "round_number": round_number,
+            "norms_used": list(norms.excerpts),
+            "legal_warnings": _norms_warning(norms, ROLE_CLAIMANT, round_number),
+        }
 
     def defendant_turn(state: DebateState) -> dict:
         """Реплика юриста ответчика."""
@@ -198,11 +226,18 @@ def build_graph(
                 model=cfg.model_for(ROLE_DEFENDANT),
             )
         )
+        norms = build_verified_norms(
+            state["cfg"],
+            state["materials"],
+            ROLE_DEFENDANT,
+            f"возражения ответчика (раунд {round_number} прений)",
+        )
         statement = defendant_lawyer.make_statement(
             state["cfg"],
             state["materials"],
             round_number,
             state.get("history", []),
+            norms_block=norms.block,
             on_delta=lambda chunk: emit(
                 DebateEvent(EVENT_DELTA, role=ROLE_DEFENDANT, round=round_number, text=chunk)
             ),
@@ -217,7 +252,11 @@ def build_graph(
             )
         )
         logger.info("Узел %s: реплика %d симв. (раунд %d).", NODE_DEFENDANT, len(statement.text), round_number)
-        return {"history": [statement]}
+        return {
+            "history": [statement],
+            "norms_used": list(norms.excerpts),
+            "legal_warnings": _norms_warning(norms, ROLE_DEFENDANT, round_number),
+        }
 
     def judge_review(state: DebateState) -> dict:
         """Оценка судьи по итогам раунда + решение о ходе процесса."""
@@ -302,10 +341,17 @@ def build_graph(
                 model=cfg.model_for(ROLE_JUDGE),
             )
         )
+        norms = build_verified_norms(
+            state["cfg"],
+            state["materials"],
+            ROLE_JUDGE,
+            "итоговое мотивированное решение судьи",
+        )
         verdict = judge_agent.generate_verdict(
             state["cfg"],
             state["materials"],
             state.get("history", []),
+            norms_block=norms.block,
             on_delta=lambda chunk: emit(
                 DebateEvent(EVENT_DELTA, role=ROLE_JUDGE, round=round_number, text=chunk)
             ),
@@ -328,7 +374,11 @@ def build_graph(
             )
         )
         logger.info("Узел %s: решение готово (%d симв.).", NODE_VERDICT, len(verdict))
-        return {"verdict": verdict}
+        return {
+            "verdict": verdict,
+            "norms_used": list(norms.excerpts),
+            "legal_warnings": _norms_warning(norms, ROLE_JUDGE, round_number),
+        }
 
     def recommendations_node(state: DebateState) -> dict:
         """Блок рекомендаций для стороны, выбранной пользователем (target_side)."""
@@ -342,12 +392,20 @@ def build_graph(
                 model=cfg.model_for(ROLE_JUDGE),
             )
         )
+        target_side = state.get("target_side", "claimant")
+        norms = build_verified_norms(
+            state["cfg"],
+            state["materials"],
+            ROLE_JUDGE,
+            f"блок рекомендаций для стороны {advisor.SIDE_TITLES.get(target_side, target_side)}",
+        )
         rec = advisor.generate_recommendations(
             state["cfg"],
             state["materials"],
             state.get("history", []),
             state.get("verdict", ""),
-            state.get("target_side", "claimant"),
+            target_side,
+            norms_block=norms.block,
             on_delta=lambda chunk: emit(
                 DebateEvent(
                     EVENT_DELTA,
@@ -381,7 +439,11 @@ def build_graph(
             rec.target_side,
             rec.prospects,
         )
-        return {"recommendations": rec}
+        return {
+            "recommendations": rec,
+            "norms_used": list(norms.excerpts),
+            "legal_warnings": _norms_warning(norms, ROLE_JUDGE, round_number),
+        }
 
     graph = StateGraph(DebateState)
     graph.add_node(NODE_INIT, init)
@@ -409,6 +471,25 @@ def build_graph(
 
 #: Кэш материалов дела в пределах процесса (ключ — корень проекта).
 _case_cache: dict[str, CaseMaterials] = {}
+
+
+def _dedupe_norms(items: list[LawExcerpt]) -> tuple[LawExcerpt, ...]:
+    """Дедупликация норм по eid с сохранением порядка (запросы узлов пересекаются)."""
+    seen: set[str] = set()
+    ordered: list[LawExcerpt] = []
+    for item in items:
+        key = item.eid or item.source_url
+        if key in seen:
+            continue
+        seen.add(key)
+        ordered.append(item)
+    return tuple(ordered)
+
+
+def _join_warnings(warnings: list[str]) -> str | None:
+    """Слить предупреждения узлов без повторов; None, если всё чисто."""
+    unique = list(dict.fromkeys(warning for warning in warnings if warning))
+    return "; ".join(unique) or None
 
 
 def _load_case_cached(cfg: Config) -> CaseMaterials:
@@ -485,6 +566,8 @@ def run_debate(
         finished_by_judge=bool(decision is not None and not decision.continues),
         target_side=target_side,
         recommendations=final.get("recommendations"),
+        verified_norms=_dedupe_norms(final.get("norms_used", [])),
+        legal_warning=_join_warnings(final.get("legal_warnings", [])),
     )
     logger.info(
         "Симуляция завершена: раундов=%d, завершена судьёй=%s, реплик=%d, вердикт=%d симв.",

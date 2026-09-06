@@ -45,10 +45,13 @@ def make_statement(
     round_number: int,
     history: Sequence[Statement],
     *,
+    norms_block: str = "",
     on_delta: DeltaCallback | None = None,
 ) -> Statement:
     """Реплика юриста ответчика для раунда ``round_number`` с учётом истории прений."""
     system_prompt = build_system_prompt(cfg, materials)
+    if norms_block:
+        system_prompt += f"\n\n{norms_block}"
     if round_number <= 1 or not history:
         task = _ROUND1_TASK.format(round=round_number)
     else:

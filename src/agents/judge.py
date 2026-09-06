@@ -139,6 +139,7 @@ def generate_verdict(
     materials: CaseMaterials,
     history: Sequence[Statement],
     *,
+    norms_block: str = "",
     on_delta: DeltaCallback | None = None,
 ) -> str:
     """Итоговое мотивированное решение судьи по всей истории прений."""
@@ -148,9 +149,12 @@ def generate_verdict(
         "Вынесите итоговое мотивированное решение по структуре из инструкции."
     )
     logger.info("Судья выносит итоговое решение по %d репликам.", len(history))
+    system_prompt = build_verdict_prompt(cfg, materials)
+    if norms_block:
+        system_prompt += f"\n\n{norms_block}"
     return chat(
         ROLE_JUDGE,
-        build_verdict_prompt(cfg, materials),
+        system_prompt,
         [{"role": "user", "content": user_prompt}],
         temperature=0.2,
         on_delta=on_delta,

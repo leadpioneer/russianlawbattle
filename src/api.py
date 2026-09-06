@@ -274,6 +274,16 @@ def report(session_id: str, format: str = "md") -> Any:
                 for statement in result.history
             ],
             "verdict": result.verdict,
+            "verified_norms": [
+                {
+                    "title": norm.title,
+                    "number": norm.number,
+                    "date": norm.date,
+                    "url": norm.source_url,
+                }
+                for norm in result.verified_norms
+            ],
+            "legal_warning": result.legal_warning,
             "recommendations": None
             if rec is None
             else {
