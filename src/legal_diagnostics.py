@@ -43,5 +43,47 @@ def mcp(
     raise typer.Exit(code=0 if report.ok else 1)
 
 
+@app.command()
+def mock(
+    query: str = typer.Option(
+        DEFAULT_PROBE_QUERY, "--query", "-q", help="Тестовый поисковый запрос."
+    ),
+    json_output: bool = typer.Option(False, "--json", help="Вывести JSON вместо текста."),
+) -> None:
+    """Smoke-тест mock-провайдера БЕЗ сети (фикстуры, помечены как тестовые)."""
+    import asyncio
+
+    from .legal.models import EvidencePack, now_iso
+    from .legal.providers.mock import MockLegalProvider
+
+    provider = MockLegalProvider()
+
+    async def _run() -> EvidencePack:
+        health = await provider.healthcheck()
+        statutes = await provider.search_statutes(query, "Российская Федерация")
+        case_law = await provider.search_case_law(query, "Российская Федерация")
+        return EvidencePack(
+            case_id="mock-smoke",
+            jurisdiction="Российская Федерация",
+            generated_at=now_iso(),
+            legal_issues=[query],
+            sources=[*statutes, *case_law],
+            provider_statuses=[health],
+            warnings=[],
+        )
+
+    pack = asyncio.run(_run())
+    if json_output:
+        typer.echo(pack.to_json())
+    else:
+        statuses = {s.id: s.verification_status for s in pack.sources}
+        typer.echo(f"Провайдер: {provider.name} — {pack.provider_statuses[0].status}")
+        for s in pack.sources:
+            typer.echo(f"  [{s.id}] {s.verification_status:20s} {s.citation}")
+        typer.echo(f"Статусы: {statuses}")
+    raise typer.Exit(code=0 if pack.verified_sources else 1)
+
+
+
 if __name__ == "__main__":
     app()
