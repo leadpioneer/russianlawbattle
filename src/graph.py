@@ -2,20 +2,29 @@
 
 Топология графа::
 
-    START -> init -> claimant_turn -> defendant_turn -> judge_review
+    START -> init -> build_evidence_pack -> claimant_turn -> defendant_turn
+          -> judge_review
     judge_review --(судья: ПРОДОЛЖАТЬ и лимит раундов не исчерпан)--> claimant_turn
     judge_review --(иначе: ЗАВЕРШИТЬ или достигнут max_rounds)------> final_verdict
     final_verdict -> recommendations (блок рекомендаций для target_side) -> END
+
+Узел ``build_evidence_pack`` (этап 3) выполняется ОДИН раз до прений: извлекает
+правовые вопросы дела, опрашивает провайдеров (pravo.gov.ru и др.) и собирает
+Evidence Pack с честными статусами верификации. Общий Evidence Pack получают
+все три роли — каждый интерпретирует его в интересах своей стороны. Если
+подтверждённых источников нет, симуляция продолжается в degraded-режиме:
+агенты получают инструкцию не утверждать точные нормы как факт.
 
 Судья-супервизор единственный решает, когда прения заканчиваются; ``max_rounds``
 из конфига — жёсткий предохранитель. Полная история реплик остаётся в состоянии
 графа и возвращается в :class:`DebateResult` для отчёта (report.py).
 
 Протокол событий: узлы публикуют :class:`DebateEvent` (начало реплики, фрагменты
-генерации, решение судьи по раунду, готовый вердикт) через единый ``sink``-колбэк —
-консоль (CLI) и WebSocket (веб) получают один и тот же поток событий. Для обратной
-совместимости поддержаны прежние ``on_delta``/``announce``: события конвертируются
-в них, поэтому существующий CLI-код не меняется.
+генерации, решение судьи по раунду, готовый вердикт, прогресс правового
+исследования) через единый ``sink``-колбэк — консоль (CLI) и WebSocket (веб)
+получают один и тот же поток событий. Для обратной совместимости поддержаны
+прежние ``on_delta``/``announce``: события конвертируются в них, поэтому
+существующий CLI-код не меняется.
 """
 
 from __future__ import annotations
@@ -33,6 +42,10 @@ from .agents import judge as judge_agent
 from .agents.base import ROLE_CLAIMANT, ROLE_DEFENDANT, ROLE_JUDGE, SPEAKER_TITLES, Statement
 from .agents.legal_context import VerifiedNorms, build_verified_norms
 from .legal_tools import LawExcerpt
+from .legal.evidence_pack import build_evidence_pack_async
+from .legal.issue_extractor import LegalIssues
+from .legal.models import EvidencePack, LegalSource
+from .legal.prompts import format_evidence_block
 from .config import Config, load_config
 from .document_loader import CaseMaterials, load_case
 from .llm_client import (
@@ -61,6 +74,11 @@ EVENT_RECOMMENDATIONS_DONE = "recommendations_done"  # блок рекоменд
 EVENT_VERDICT_DONE = "verdict_done"  # итоговое решение вынесено
 EVENT_DEBATE_DONE = "debate_done"  # симуляция завершена (payload: статистика)
 EVENT_ERROR = "error"  # фатальная ошибка симуляции (payload: message) — публикует бэкенд при сбое
+# Правовой research layer (этап 3):
+EVENT_LEGAL_RESEARCH_STARTED = "legal_research_started"  # начато исследование права
+EVENT_PROVIDER_STATUS = "provider_status"  # статус провайдера (payload: provider, status, message)
+EVENT_LEGAL_SOURCE_FOUND = "legal_source_found"  # найден источник (payload: source_id, verification_status, citation)
+EVENT_EVIDENCE_PACK_READY = "evidence_pack_ready"  # pack готов (payload: verified_count, partial_count, warning_count)
 
 
 @dataclass(frozen=True)
@@ -91,6 +109,8 @@ EventSink = Callable[[DebateEvent], None]
 
 #: Имена узлов графа.
 NODE_INIT = "init"
+NODE_EXTRACT_ISSUES = "extract_issues"
+NODE_RESEARCH = "build_evidence_pack"
 NODE_CLAIMANT = "claimant_turn"
 NODE_DEFENDANT = "defendant_turn"
 NODE_JUDGE = "judge_review"
@@ -108,6 +128,40 @@ def _norms_warning(norms: VerifiedNorms, role: str, round_number: int) -> list[s
     ]
 
 
+def _pack_to_excerpts(pack: EvidencePack | None) -> list[LawExcerpt]:
+    """Конвертация источников Evidence Pack в LawExcerpt (для отчёта, этап 2).
+
+    Совместимость: отчёт и API ожидают LawExcerpt; статусы верификации этапа 3
+    теряются в этой проекции (полные данные — в evidence_pack отчёта).
+    """
+    if pack is None:
+        return []
+    return [
+        LawExcerpt(
+            eid=source.official_url or source.id,
+            title=source.title,
+            act_type=source.source_type,
+            number="",
+            date=source.effective_date or "",
+            source_url=source.official_url or "",
+            text=source.excerpt,
+            text_available=bool(source.excerpt),
+            verified=source.verified,
+        )
+        for source in pack.sources
+    ]
+
+
+def _pack_warnings(pack: EvidencePack | None, role: str, round_number: int) -> list[str]:
+    """Предупреждения Evidence Pack (degraded-режим) для состояния графа."""
+    if pack is None or pack.verified_sources:
+        return []
+    return [
+        f"{SPEAKER_TITLES.get(role, role)} (раунд {round_number}): подтверждённых "
+        "правовых источников нет; ссылки на нормы требуют ручной проверки"
+    ]
+
+
 class DebateState(TypedDict, total=False):
     """Состояние процесса (in-memory, узлы возвращают частичные обновления)."""
 
@@ -122,6 +176,10 @@ class DebateState(TypedDict, total=False):
     norms_used: Annotated[list[LawExcerpt], operator.add]  # подтверждённые нормы за прогон
     legal_warnings: Annotated[list[str], operator.add]  # предупреждения о неподтверждённых нормах
     stopped: bool  # пользователь нажал «Остановить» (частичный результат)
+    # Правовой research layer (этап 3):
+    legal_issues: LegalIssues | None  # структурированные вопросы дела
+    evidence_pack: EvidencePack | None  # собранный до прений набор источников
+    evidence_block: str  # готовый prompt-блок Evidence Pack (для всех агентов)
 
 
 @dataclass(frozen=True)
@@ -140,6 +198,7 @@ class DebateResult:
     legal_warning: str | None = None  # предупреждение о неподтверждённых нормах (в отчёт)
     stopped: bool = False  # симуляция остановлена пользователем до финала
     usage_log: tuple[tuple[str, str, Any], ...] = ()  # (роль, модель, TokenUsage) за прогон
+    evidence_pack: EvidencePack | None = None  # Evidence Pack прений (этап 3)
 
 
 def build_graph(
@@ -183,8 +242,49 @@ def build_graph(
         )
         return {"cfg": cfg, "materials": materials, "round_number": 0}
 
+    def legal_research(state: DebateState) -> dict:
+        """Узел research: вопросы дела → провайдеры → Evidence Pack (этап 3).
+
+        Выполняется ОДИН раз до прений; общий Evidence Pack получают все три
+        роли. Ошибка исследования деградирует (пустой pack + warning), но не
+        роняет симуляцию.
+        """
+        if stopped_now():
+            return {"stopped": True}
+        emit(DebateEvent(EVENT_LEGAL_RESEARCH_STARTED))
+        materials: CaseMaterials = state["materials"]
+        free_text = (materials.context or "").strip() or None
+        try:
+            pack, issues = _run_evidence_pack(
+                cfg, materials, free_text_query=free_text, emit=emit
+            )
+        except Exception as exc:  # noqa: BLE001 — деградация вместо падения симуляции
+            logger.warning("Правовое исследование не удалось: %s", exc)
+            from .legal.models import now_iso
+
+            pack = EvidencePack(
+                case_id="session",
+                jurisdiction=cfg.jurisdiction,
+                generated_at=now_iso(),
+                warnings=[f"правовое исследование не удалось: {type(exc).__name__}: {exc}"],
+            )
+            issues = LegalIssues(source="fallback")
+        block = format_evidence_block(pack)
+        logger.info(
+            "Узел %s: источников=%d (verified=%d), warnings=%d.",
+            NODE_RESEARCH,
+            len(pack.sources),
+            len(pack.verified_sources),
+            len(pack.warnings),
+        )
+        return {
+            "legal_issues": issues,
+            "evidence_pack": pack,
+            "evidence_block": block,
+        }
+
     def claimant_turn(state: DebateState) -> dict:
-        """Реплика юриста заявителя."""
+        """Реплика юриста заявителя (с общим Evidence Pack)."""
         if stopped_now():
             return {"stopped": True}
         round_number = state["round_number"] + 1
@@ -197,18 +297,12 @@ def build_graph(
                 model=cfg.model_for(ROLE_CLAIMANT),
             )
         )
-        norms = build_verified_norms(
-            state["cfg"],
-            state["materials"],
-            ROLE_CLAIMANT,
-            f"позиция заявителя (раунд {round_number} прений)",
-        )
         statement = claimant_lawyer.make_statement(
             state["cfg"],
             state["materials"],
             round_number,
             state.get("history", []),
-            norms_block=norms.block,
+            norms_block=state.get("evidence_block", ""),
             on_delta=lambda chunk: emit(
                 DebateEvent(EVENT_DELTA, role=ROLE_CLAIMANT, round=round_number, text=chunk)
             ),
@@ -227,12 +321,12 @@ def build_graph(
         return {
             "history": [statement],
             "round_number": round_number,
-            "norms_used": list(norms.excerpts),
-            "legal_warnings": _norms_warning(norms, ROLE_CLAIMANT, round_number),
+            "norms_used": _pack_to_excerpts(state.get("evidence_pack")),
+            "legal_warnings": _pack_warnings(state.get("evidence_pack"), ROLE_CLAIMANT, round_number),
         }
 
     def defendant_turn(state: DebateState) -> dict:
-        """Реплика юриста ответчика."""
+        """Реплика юриста ответчика (с общим Evidence Pack)."""
         if stopped_now():
             return {"stopped": True}
         round_number = state["round_number"]
@@ -245,18 +339,12 @@ def build_graph(
                 model=cfg.model_for(ROLE_DEFENDANT),
             )
         )
-        norms = build_verified_norms(
-            state["cfg"],
-            state["materials"],
-            ROLE_DEFENDANT,
-            f"возражения ответчика (раунд {round_number} прений)",
-        )
         statement = defendant_lawyer.make_statement(
             state["cfg"],
             state["materials"],
             round_number,
             state.get("history", []),
-            norms_block=norms.block,
+            norms_block=state.get("evidence_block", ""),
             on_delta=lambda chunk: emit(
                 DebateEvent(EVENT_DELTA, role=ROLE_DEFENDANT, round=round_number, text=chunk)
             ),
@@ -274,8 +362,8 @@ def build_graph(
         logger.info("Узел %s: реплика %d симв. (раунд %d).", NODE_DEFENDANT, len(statement.text), round_number)
         return {
             "history": [statement],
-            "norms_used": list(norms.excerpts),
-            "legal_warnings": _norms_warning(norms, ROLE_DEFENDANT, round_number),
+            "norms_used": _pack_to_excerpts(state.get("evidence_pack")),
+            "legal_warnings": _pack_warnings(state.get("evidence_pack"), ROLE_DEFENDANT, round_number),
         }
 
     def judge_review(state: DebateState) -> dict:
@@ -355,7 +443,7 @@ def build_graph(
         return NODE_CLAIMANT
 
     def final_verdict(state: DebateState) -> dict:
-        """Итоговое мотивированное решение судьи."""
+        """Итоговое мотивированное решение судьи (с общим Evidence Pack)."""
         if stopped_now():
             return {"stopped": True}
         round_number = state["round_number"]
@@ -369,17 +457,11 @@ def build_graph(
                 model=cfg.model_for(ROLE_JUDGE),
             )
         )
-        norms = build_verified_norms(
-            state["cfg"],
-            state["materials"],
-            ROLE_JUDGE,
-            "итоговое мотивированное решение судьи",
-        )
         verdict = judge_agent.generate_verdict(
             state["cfg"],
             state["materials"],
             state.get("history", []),
-            norms_block=norms.block,
+            norms_block=state.get("evidence_block", ""),
             on_delta=lambda chunk: emit(
                 DebateEvent(EVENT_DELTA, role=ROLE_JUDGE, round=round_number, text=chunk)
             ),
@@ -405,12 +487,12 @@ def build_graph(
         logger.info("Узел %s: решение готово (%d симв.).", NODE_VERDICT, len(verdict))
         return {
             "verdict": verdict,
-            "norms_used": list(norms.excerpts),
-            "legal_warnings": _norms_warning(norms, ROLE_JUDGE, round_number),
+            "norms_used": _pack_to_excerpts(state.get("evidence_pack")),
+            "legal_warnings": _pack_warnings(state.get("evidence_pack"), ROLE_JUDGE, round_number),
         }
 
     def recommendations_node(state: DebateState) -> dict:
-        """Блок рекомендаций для стороны, выбранной пользователем (target_side)."""
+        """Блок рекомендаций для стороны, выбранной пользователем (с Evidence Pack)."""
         if stopped_now():
             return {"stopped": True}
         round_number = state["round_number"]
@@ -424,19 +506,13 @@ def build_graph(
             )
         )
         target_side = state.get("target_side", "claimant")
-        norms = build_verified_norms(
-            state["cfg"],
-            state["materials"],
-            ROLE_JUDGE,
-            f"блок рекомендаций для стороны {advisor.SIDE_TITLES.get(target_side, target_side)}",
-        )
         rec = advisor.generate_recommendations(
             state["cfg"],
             state["materials"],
             state.get("history", []),
             state.get("verdict", ""),
             target_side,
-            norms_block=norms.block,
+            norms_block=state.get("evidence_block", ""),
             on_delta=lambda chunk: emit(
                 DebateEvent(
                     EVENT_DELTA,
@@ -473,12 +549,13 @@ def build_graph(
         )
         return {
             "recommendations": rec,
-            "norms_used": list(norms.excerpts),
-            "legal_warnings": _norms_warning(norms, ROLE_JUDGE, round_number),
+            "norms_used": _pack_to_excerpts(state.get("evidence_pack")),
+            "legal_warnings": _pack_warnings(state.get("evidence_pack"), ROLE_JUDGE, round_number),
         }
 
     graph = StateGraph(DebateState)
     graph.add_node(NODE_INIT, init)
+    graph.add_node(NODE_RESEARCH, legal_research)
     graph.add_node(NODE_CLAIMANT, claimant_turn)
     graph.add_node(NODE_DEFENDANT, defendant_turn)
     graph.add_node(NODE_JUDGE, judge_review)
@@ -486,7 +563,8 @@ def build_graph(
     graph.add_node(NODE_RECOMMENDATIONS, recommendations_node)
 
     graph.add_edge(START, NODE_INIT)
-    graph.add_edge(NODE_INIT, NODE_CLAIMANT)
+    graph.add_edge(NODE_INIT, NODE_RESEARCH)
+    graph.add_edge(NODE_RESEARCH, NODE_CLAIMANT)
     graph.add_edge(NODE_CLAIMANT, NODE_DEFENDANT)
     graph.add_edge(NODE_DEFENDANT, NODE_JUDGE)
     graph.add_conditional_edges(
@@ -497,7 +575,10 @@ def build_graph(
     graph.add_edge(NODE_VERDICT, NODE_RECOMMENDATIONS)
     graph.add_edge(NODE_RECOMMENDATIONS, END)
 
-    logger.info("Граф прений собран: init -> claimant_turn -> defendant_turn -> judge_review -> ...")
+    logger.info(
+        "Граф прений собран: init -> build_evidence_pack -> claimant_turn -> "
+        "defendant_turn -> judge_review -> ..."
+    )
     return graph.compile()
 
 
@@ -530,6 +611,79 @@ def _load_case_cached(cfg: Config) -> CaseMaterials:
     if key not in _case_cache:
         _case_cache[key] = load_case(cfg)
     return _case_cache[key]
+
+
+def _run_evidence_pack(
+    cfg: Config,
+    materials: CaseMaterials,
+    *,
+    free_text_query: str | None = None,
+    emit: EventSink,
+) -> tuple[EvidencePack, LegalIssues]:
+    """Собрать Evidence Pack синхронно (узел графа) с событиями прогресса.
+
+    Извлекает вопросы дела, запускает провайдеры, публикует события
+    ``provider_status``/``legal_source_found``/``evidence_pack_ready``.
+    Возвращает (pack, issues).
+    """
+    import asyncio
+
+    from .legal.evidence_pack import build_evidence_pack_async
+    from .legal.service import LegalResearchService
+
+    async def _status_forwarder():
+        statuses = await service.healthcheck_all()
+        for status in statuses:
+            emit(
+                DebateEvent(
+                    EVENT_PROVIDER_STATUS,
+                    payload={
+                        "provider": status.provider,
+                        "status": status.status,
+                        "message": status.message,
+                    },
+                )
+            )
+        return statuses
+
+    async def _inner() -> tuple[EvidencePack, LegalIssues]:
+        service = LegalResearchService()
+        await _status_forwarder()
+        pack, issues, _result = await build_evidence_pack_async(
+            materials.context or "",
+            materials.full_context()[:4000],
+            cfg.jurisdiction,
+            case_id="session",
+            free_text_query=free_text_query,
+            use_llm=True,
+            service=service,
+        )
+        for source in pack.sources:
+            emit(
+                DebateEvent(
+                    EVENT_LEGAL_SOURCE_FOUND,
+                    payload={
+                        "source_id": source.id,
+                        "verification_status": source.verification_status,
+                        "citation": source.citation[:200],
+                        "source_type": source.source_type,
+                    },
+                )
+            )
+        emit(
+            DebateEvent(
+                EVENT_EVIDENCE_PACK_READY,
+                payload={
+                    "verified_count": len(pack.verified_sources),
+                    "partial_count": len(pack.partially_verified_sources),
+                    "warning_count": len(pack.warnings),
+                    "total_sources": len(pack.sources),
+                },
+            )
+        )
+        return pack, issues
+
+    return asyncio.run(_inner())
 
 
 def clear_case_cache() -> None:
@@ -608,6 +762,7 @@ def run_debate(
         legal_warning=_join_warnings(final.get("legal_warnings", [])),
         stopped=stopped,
         usage_log=tuple(get_usage_log()),
+        evidence_pack=final.get("evidence_pack"),
     )
     logger.info(
         "Симуляция завершена: раундов=%d, завершена судьёй=%s, остановлена=%s, реплик=%d, "

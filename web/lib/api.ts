@@ -37,6 +37,34 @@ export interface DebateEvent {
   payload?: Record<string, unknown>;
 }
 
+// --- Правовой research layer (этап 3): payload-типы новых событий ----------
+
+export interface ProviderStatusPayload {
+  provider: string;
+  status: "healthy" | "degraded" | "unavailable" | "not_configured";
+  message?: string | null;
+}
+
+export interface LegalSourceFoundPayload {
+  source_id: string;
+  verification_status:
+    | "verified"
+    | "partially_verified"
+    | "unverified"
+    | "unavailable"
+    | "contradicted";
+  citation?: string;
+  source_type?: string;
+}
+
+export interface EvidencePackReadyPayload {
+  verified_count: number;
+  partial_count: number;
+  warning_count: number;
+  total_sources?: number;
+}
+
+
 export interface NormExcerpt {
   title: string;
   number: string;
