@@ -49,9 +49,11 @@ logger = logging.getLogger(__name__)
 app = FastAPI(title="Судебный симулятор API", version="0.1.0")
 
 # Фронтенд (Next.js dev :3000) ходит к бэкенду с другого порта — нужен CORS.
+# Регэксп вместо списка портов: интерфейс может открываться и по сетевому IP
+# (http://192.168.x.x:3000, как показывает next start), локальный инструмент.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
+    allow_origin_regex=".*",
     allow_methods=["*"],
     allow_headers=["*"],
 )

@@ -98,13 +98,29 @@ async function ensureOk(response: Response): Promise<Response> {
   return response;
 }
 
+/** fetch с человеческим сообщением, когда бэкенд недоступен (сеть/CORS/выключен). */
+async function safeFetch(url: string, init?: RequestInit): Promise<Response> {
+  try {
+    return await fetch(url, init);
+  } catch (err) {
+    if (err instanceof TypeError) {
+      throw new Error(
+        `Не удалось связаться с бэкендом ${API_BASE}. ` +
+          "Убедитесь, что запущено окно «court-sim backend» (install.bat), " +
+          "и перезагрузите страницу.",
+      );
+    }
+    throw err;
+  }
+}
+
 export async function fetchDefaults(): Promise<DefaultsData> {
-  const response = await ensureOk(await fetch(`${API_BASE}/api/defaults`));
+  const response = await ensureOk(await safeFetch(`${API_BASE}/api/defaults`));
   return response.json();
 }
 
 export async function createSession(payload: SetupPayload): Promise<string> {
-  const response = await ensureOk(await fetch(`${API_BASE}/api/setup`, {
+  const response = await ensureOk(await safeFetch(`${API_BASE}/api/setup`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
@@ -122,20 +138,30 @@ export async function uploadCase(
   for (const file of files) form.append("files", file);
   form.append("context", context);
   const response = await ensureOk(
-    await fetch(`${API_BASE}/api/upload/${sessionId}`, { method: "POST", body: form }),
+    await safeFetch(`${API_BASE}/api/upload/${sessionId}`, { method: "POST", body: form }),
   );
   return response.json();
 }
 
 export async function startRun(sessionId: string): Promise<void> {
-  await ensureOk(await fetch(`${API_BASE}/api/run/${sessionId}`, { method: "POST" }));
+  await ensureOk(await safeFetch(`${API_BASE}/api/run/${sessionId}`, { method: "POST" }));
 }
 
 export async function fetchReport(sessionId: string): Promise<ReportData> {
   const response = await ensureOk(
-    await fetch(`${API_BASE}/api/report/${sessionId}?format=json`),
+    await safeFetch(`${API_BASE}/api/report/${sessionId}?format=json`),
   );
   return response.json();
+}
+
+/** Проверка живости бэкенда (индикатор в шапке). */
+export async function checkHealth(): Promise<boolean> {
+  try {
+    const response = await fetch(`${API_BASE}/api/health`);
+    return response.ok;
+  } catch {
+    return false;
+  }
 }
 
 export function reportDownloadUrl(sessionId: string): string {

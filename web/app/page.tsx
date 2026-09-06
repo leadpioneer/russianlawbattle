@@ -2,15 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { DebateEvent, DefaultsData, TargetSide } from "@/lib/api";
-import {
-  connectSessionSocket,
-  createSession,
-  fetchDefaults,
-  fetchReport,
-  reportDownloadUrl,
-  startRun,
-  uploadCase,
-} from "@/lib/api";
+import { API_BASE, checkHealth, connectSessionSocket, createSession, fetchDefaults, fetchReport, reportDownloadUrl, startRun, uploadCase } from "@/lib/api";
 
 /** Ключ localStorage с настройками формы (восстанавливаются при следующем открытии). */
 const SETTINGS_KEY = "court-sim-settings-v1";
@@ -68,30 +60,89 @@ const ROLE_STYLES: Record<string, string> = {
   judge: "border-violet-300 bg-violet-50",
 };
 
-/** Простой markdown-рендер: заголовки, списки, абзацы. */
+/** Инлайн-форматирование: **жирный**, `код`, ссылки [текст](url). */
+function InlineText({ text }: { text: string }) {
+  const parts = text.split(/(\*\*[^*]+\*\*|`[^`]+`|\[[^\]]+\]\([^)]+\))/g);
+  return (
+    <>
+      {parts.map((part, index) => {
+        if (part.startsWith("**") && part.endsWith("**") && part.length > 4) {
+          return <strong key={index}>{part.slice(2, -2)}</strong>;
+        }
+        if (part.startsWith("`") && part.endsWith("`") && part.length > 2) {
+          return (
+            <code key={index} className="rounded bg-slate-100 px-1 py-0.5 font-mono text-[0.9em]">
+              {part.slice(1, -1)}
+            </code>
+          );
+        }
+        const link = part.match(/^\[([^\]]+)\]\(([^)]+)\)$/);
+        if (link) {
+          return (
+            <a
+              key={index}
+              href={link[2]}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-blue-600 hover:underline"
+            >
+              {link[1]} ↗
+            </a>
+          );
+        }
+        return <span key={index}>{part}</span>;
+      })}
+    </>
+  );
+}
+
+/** Простой markdown-рендер: заголовки, списки, абзацы + инлайн-формат. */
 function Markdown({ text }: { text: string }) {
   const blocks = text.trim().split(/\n{2,}/);
   return (
     <div className="space-y-3 text-sm leading-relaxed">
       {blocks.map((block, index) => {
-        const lines = block.split("\n");
-        if (lines.every((line) => line.trim().startsWith("#"))) {
+        const lines = block.split("\n").filter((line) => line.trim());
+        if (!lines.length) return null;
+        // Заголовки: строка блока начинается с #
+        if (lines[0].trimStart().startsWith("#")) {
+          const level = (lines[0].trimStart().match(/^#+/) ?? ["#"])[0].length;
+          const content = lines.map((line) => line.replace(/^#+\s*/, "")).join(" · ");
+          const size =
+            level === 1
+              ? "text-base font-bold"
+              : level === 2
+                ? "text-sm font-semibold"
+                : "text-sm font-semibold text-slate-700";
           return (
-            <h3 key={index} className="font-semibold text-slate-900">
-              {lines.map((line) => line.replace(/^#+\s*/, "")).join(" · ")}
+            <h3 key={index} className={size}>
+              <InlineText text={content} />
             </h3>
           );
         }
-        if (lines.every((line) => !line.trim() || /^\s*[-*•]\s+/.test(line))) {
+        // Списки: - / * / 1.
+        if (lines.every((line) => /^\s*([-*•]|\d+[.)])\s+/.test(line))) {
+          const ordered = /^\s*\d/.test(lines[0]);
+          const items = lines.map((line) => line.replace(/^\s*([-*•]|\d+[.)])\s+/, ""));
+          const ListTag = ordered ? "ol" : "ul";
           return (
-            <ul key={index} className="list-disc space-y-1 pl-5">
-              {lines.filter((line) => line.trim()).map((line, i) => (
-                <li key={i}>{line.replace(/^\s*[-*•]\s+/, "")}</li>
+            <ListTag
+              key={index}
+              className={`space-y-1 pl-5 ${ordered ? "list-decimal" : "list-disc"}`}
+            >
+              {items.map((item, i) => (
+                <li key={i}>
+                  <InlineText text={item} />
+                </li>
               ))}
-            </ul>
+            </ListTag>
           );
         }
-        return <p key={index}>{block}</p>;
+        return (
+          <p key={index}>
+            <InlineText text={block} />
+          </p>
+        );
       })}
     </div>
   );
@@ -128,11 +179,12 @@ export default function Home() {
   const [typing, setTyping] = useState(false);
   const feedRef = useRef<HTMLDivElement>(null);
   const nextId = useRef(1);
-  const fileInputRef = useRef<HTMLInputElement>(null);
 
   // --- итог ---
   const [report, setReport] = useState<Awaited<ReturnType<typeof fetchReport>> | null>(null);
   const sessionIdRef = useRef<string | null>(null);
+  // Живость бэкенда (индикатор в шапке).
+  const [backendUp, setBackendUp] = useState<boolean | null>(null);
 
   const scrollFeed = useCallback(() => {
     requestAnimationFrame(() => {
@@ -183,6 +235,20 @@ export default function Home() {
     configDefaults.has_env_key;
 
   const canStart = files.length > 0 || context.trim().length > 0;
+
+  // Индикатор бэкенда: проверяем сейчас и далее раз в 5 секунд.
+  useEffect(() => {
+    let cancelled = false;
+    const poll = () => {
+      checkHealth().then((ok) => !cancelled && setBackendUp(ok));
+    };
+    poll();
+    const timer = setInterval(poll, 5000);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, []);
 
   const runDebate = useCallback(
     async (sessionId: string) => {
@@ -371,13 +437,24 @@ export default function Home() {
     <main className="mx-auto w-full max-w-4xl flex-1 px-4 py-8">
       <div className="mb-6 flex flex-wrap items-center justify-between gap-3 no-print">
         <h1 className="text-2xl font-bold">⚖ Судебный симулятор</h1>
-        <div className="flex flex-wrap gap-4 text-sm">
+        <div className="flex flex-wrap items-center gap-4 text-sm">
           {stepBadge(1, "Настройка")}
           {stepBadge(2, "Загрузка дела")}
           {stepBadge(3, "Прения")}
           {stepBadge(4, "Итог")}
         </div>
       </div>
+
+      {backendUp === false && (
+        <div className="mb-4 flex items-center gap-3 rounded-xl border border-red-300 bg-red-50 px-4 py-3 text-sm text-red-900 no-print">
+          <span className="h-3 w-3 shrink-0 rounded-full bg-red-500" />
+          <span>
+            Бэкенд не отвечает ({API_BASE}). Запустите <b>install.bat</b> (или окно «court-sim
+            backend»: <code>.venv\Scripts\python.exe -m uvicorn src.api:app --port 8000</code>) и
+            подождите пару секунд — индикатор станет зелёным.
+          </span>
+        </div>
+      )}
 
       {error && (
         <div className="mb-4 rounded-lg border border-red-300 bg-red-50 px-4 py-3 text-sm text-red-800">
@@ -618,24 +695,19 @@ export default function Home() {
           >
             <p className="font-medium">Перетащите файлы сюда</p>
             <p className="mt-1 text-sm text-slate-500">PDF · DOCX · TXT · MD</p>
-            <button
-              type="button"
-              onClick={() => fileInputRef.current?.click()}
-              className="mt-3 text-sm font-medium text-blue-600 hover:underline"
-            >
+            <label className="mt-3 inline-block cursor-pointer text-sm font-medium text-blue-600 hover:underline">
               или выберите на диске
-            </button>
-            <input
-              ref={fileInputRef}
-              type="file"
-              multiple
-              accept=".pdf,.docx,.txt,.md"
-              className="hidden"
-              onChange={(e) => {
-                if (e.target.files) addFiles(e.target.files);
-                e.target.value = "";
-              }}
-            />
+              <input
+                type="file"
+                multiple
+                accept=".pdf,.docx,.txt,.md"
+                onChange={(e) => {
+                  if (e.target.files) addFiles(e.target.files);
+                  e.target.value = "";
+                }}
+                className="sr-only"
+              />
+            </label>
             {clientFileError && (
               <p className="mt-3 text-sm text-red-600">{clientFileError}</p>
             )}
@@ -725,7 +797,11 @@ export default function Home() {
                   <span>раунд {message.round}</span>
                   {message.model && <span className="font-mono">{message.model}</span>}
                 </header>
-                <p className="whitespace-pre-wrap text-sm leading-relaxed">{message.text}</p>
+                {message.text ? (
+                  <Markdown text={message.text} />
+                ) : (
+                  <p className="text-sm text-slate-400">генерирует…</p>
+                )}
               </article>
             ))}
           </div>
@@ -757,6 +833,12 @@ export default function Home() {
                   setStage("setup");
                   setReport(null);
                   setUploadSummary(null);
+                  setFiles([]);
+                  setContext("");
+                  setError(null);
+                  setClientFileError(null);
+                  setMessages([]);
+                  sessionIdRef.current = null;
                 }}
                 className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700"
               >
@@ -840,6 +922,7 @@ export default function Home() {
 
       <footer className="mt-8 text-center text-xs text-slate-400 no-print">
         ИИ-инструмент подготовки к спору. Не заменяет консультацию практикующего юриста.
+        <br />v0.2.1
       </footer>
     </main>
   );
