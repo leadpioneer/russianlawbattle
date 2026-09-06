@@ -29,11 +29,27 @@ function loadSavedSettings(): SavedSettings | null {
 /** Пресеты моделей — дешёвые для черновиков, сильные для финала. */
 const MODEL_PRESETS: { label: string; value: string }[] = [
   { label: "GLM Flash (дешёвая)", value: "~z-ai/glm-flash-latest" },
-  { label: "DeepSeek Chat", value: "deepseek/deepseek-chat" },
-  { label: "GPT-4o", value: "openai/gpt-4o" },
-  { label: "GPT-4o mini", value: "openai/gpt-4o-mini" },
-  { label: "the model", value: "anthropic/claude-3.5-sonnet" },
+  { label: "Qwen — средний китаец", value: "qwen/qwen3.8-max-0902" },
+  { label: "DeepSeek — другой китаец", value: "~deepseek/deepseek-v4-pro-latest" },
+  { label: "Grok", value: "~x-ai/grok-latest" },
+  { label: "the model (последний)", value: "~anthropic/claude-sonnet-latest" },
+  { label: "the model (последний)", value: "~anthropic/claude-opus-latest" },
+  { label: "Kimi (последний)", value: "~moonshotai/kimi-latest" },
+  { label: "GPT-6 Astra (богоподобная)", value: "openai/gpt-6-astra" },
 ];
+
+/** Ключ localStorage с пользовательскими алиасами моделей. */
+const CUSTOM_MODELS_KEY = "court-sim-custom-models-v1";
+
+function loadCustomModels(): string[] {
+  try {
+    const raw = window.localStorage.getItem(CUSTOM_MODELS_KEY);
+    const parsed = raw ? (JSON.parse(raw) as unknown) : [];
+    return Array.isArray(parsed) ? parsed.filter((m): m is string => typeof m === "string") : [];
+  } catch {
+    return [];
+  }
+}
 
 const JURISDICTIONS = [
   "Российская Федерация, гражданское право",
@@ -148,6 +164,54 @@ function Markdown({ text }: { text: string }) {
   );
 }
 
+/** Селектор модели с пресетами, пользовательскими алиасами и пунктом «свой алиас». */
+function ModelSelect({
+  label,
+  value,
+  onChange,
+  customModels,
+  onStartAlias,
+}: {
+  label: string;
+  value: string;
+  onChange: (value: string) => void;
+  customModels: string[];
+  onStartAlias: () => void;
+}) {
+  const allValues = [...MODEL_PRESETS.map((p) => p.value), ...customModels];
+  const known = allValues.includes(value);
+  return (
+    <label className="text-sm">
+      <span className="mb-1 block font-medium">{label}</span>
+      <select
+        className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2"
+        value={known ? value : ""}
+        onChange={(e) => {
+          if (e.target.value === "__custom__") {
+            onStartAlias();
+          } else if (e.target.value) {
+            onChange(e.target.value);
+          }
+        }}
+      >
+        {!known && value && <option value="">{value} (текущая, не из списка)</option>}
+        {MODEL_PRESETS.map((preset, index) => (
+          // Дубли значений (два the model) различаем по индексу.
+          <option key={`${preset.value}-${index}`} value={preset.value}>
+            {preset.label}
+          </option>
+        ))}
+        {customModels.map((model) => (
+          <option key={model} value={model}>
+            ★ {model}
+          </option>
+        ))}
+        <option value="__custom__">✎ свой алиас…</option>
+      </select>
+    </label>
+  );
+}
+
 export default function Home() {
   const [stage, setStage] = useState<Stage>("setup");
   const [error, setError] = useState<string | null>(null);
@@ -167,6 +231,10 @@ export default function Home() {
   const [showFullForm, setShowFullForm] = useState(false);
   const [defaultsLoaded, setDefaultsLoaded] = useState(false);
   const [clientFileError, setClientFileError] = useState<string | null>(null);
+  // Пользовательские алиасы моделей (общий список для всех трёх ролей).
+  const [customModels, setCustomModels] = useState<string[]>([]);
+  const [aliasRole, setAliasRole] = useState<"claimant" | "defendant" | "judge" | null>(null);
+  const [aliasValue, setAliasValue] = useState("");
 
   // --- загрузка дела ---
   const [files, setFiles] = useState<File[]>([]);
@@ -194,6 +262,7 @@ export default function Home() {
 
   // При открытии страницы: преднастройки из config.yaml/.env + сохранённая форма.
   useEffect(() => {
+    setCustomModels(loadCustomModels());
     let cancelled = false;
     fetchDefaults()
       .then((defaults) => {
@@ -328,7 +397,7 @@ export default function Home() {
   );
 
   /** Добавить файлы (drag-and-drop или проводник) с клиентской фильтрацией. */
-  const addFiles = useCallback((incoming: FileList | File[]) => {
+  const addFiles = useCallback((incoming: File[]) => {
     const allowed = [".pdf", ".docx", ".txt", ".md"];
     const skipped: string[] = [];
     setFiles((prev) => {
@@ -595,29 +664,36 @@ export default function Home() {
             </label>
           </div>
           <div className="mt-4 grid gap-4 sm:grid-cols-2">
-            {[
-              { label: "Модель юриста заявителя", value: modelClaimant, set: setModelClaimant },
-              { label: "Модель юриста ответчика", value: modelDefendant, set: setModelDefendant },
-              { label: "Модель судьи и аналитика", value: modelJudge, set: setModelJudge },
-            ].map((field) => (
-              <label key={field.label} className="text-sm">
-                <span className="mb-1 block font-medium">{field.label}</span>
-                <select
-                  className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2"
-                  value={field.value}
-                  onChange={(e) => field.set(e.target.value)}
-                >
-                  {MODEL_PRESETS.map((preset) => (
-                    <option key={preset.value} value={preset.value}>
-                      {preset.label}
-                    </option>
-                  ))}
-                  {!MODEL_PRESETS.some((preset) => preset.value === field.value) && (
-                    <option value={field.value}>{field.value}</option>
-                  )}
-                </select>
-              </label>
-            ))}
+            <ModelSelect
+              label="Модель юриста заявителя"
+              value={modelClaimant}
+              onChange={setModelClaimant}
+              customModels={customModels}
+              onStartAlias={() => {
+                setAliasRole("claimant");
+                setAliasValue("");
+              }}
+            />
+            <ModelSelect
+              label="Модель юриста ответчика"
+              value={modelDefendant}
+              onChange={setModelDefendant}
+              customModels={customModels}
+              onStartAlias={() => {
+                setAliasRole("defendant");
+                setAliasValue("");
+              }}
+            />
+            <ModelSelect
+              label="Модель судьи и аналитика"
+              value={modelJudge}
+              onChange={setModelJudge}
+              customModels={customModels}
+              onStartAlias={() => {
+                setAliasRole("judge");
+                setAliasValue("");
+              }}
+            />
             <label className="text-sm">
               <span className="mb-1 block font-medium">Юрисдикция (можно свой вариант)</span>
               <input
@@ -633,6 +709,62 @@ export default function Home() {
               </datalist>
             </label>
           </div>
+          {aliasRole !== null && (
+            <div className="mt-4 rounded-lg border border-blue-200 bg-blue-50 px-4 py-3">
+              <label className="text-sm">
+                <span className="mb-1 block font-medium">
+                  Свой алиас модели для{" "}
+                  {aliasRole === "claimant"
+                    ? "юриста заявителя"
+                    : aliasRole === "defendant"
+                      ? "юриста ответчика"
+                      : "судьи/аналитика"}
+                </span>
+                <div className="flex gap-2">
+                  <input
+                    autoFocus
+                    className="flex-1 rounded-lg border border-blue-300 px-3 py-2 font-mono text-xs"
+                    value={aliasValue}
+                    onChange={(e) => setAliasValue(e.target.value)}
+                    placeholder="например: ~vendor/model-latest"
+                    onKeyDown={(e) => {
+                      if (e.key === "Escape") setAliasRole(null);
+                    }}
+                  />
+                  <button
+                    type="button"
+                    disabled={!aliasValue.trim()}
+                    onClick={() => {
+                      const alias = aliasValue.trim();
+                      if (!alias) return;
+                      const next = customModels.includes(alias)
+                        ? customModels
+                        : [...customModels, alias];
+                      setCustomModels(next);
+                      window.localStorage.setItem(CUSTOM_MODELS_KEY, JSON.stringify(next));
+                      if (aliasRole === "claimant") setModelClaimant(alias);
+                      else if (aliasRole === "defendant") setModelDefendant(alias);
+                      else setModelJudge(alias);
+                      setAliasRole(null);
+                    }}
+                    className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold text-white hover:bg-blue-700 disabled:opacity-50"
+                  >
+                    Добавить
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setAliasRole(null)}
+                    className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-600 hover:bg-slate-50"
+                  >
+                    Отмена
+                  </button>
+                </div>
+                <p className="mt-1 text-xs text-slate-500">
+                  Алиас сохранится в списке (★) и будет доступен во всех трёх селектах.
+                </p>
+              </label>
+            </div>
+          )}
           <div className="mt-4 text-sm">
             <span className="mb-1 block font-medium">Рекомендации готовить для стороны</span>
             <div className="flex gap-3">
@@ -687,7 +819,8 @@ export default function Home() {
             onDrop={(e) => {
               e.preventDefault();
               setDragOver(false);
-              addFiles(e.dataTransfer.files);
+              // ВАЖНО: копируем FileList синхронно — иначе список умирает вместе с событием.
+              addFiles(Array.from(e.dataTransfer.files));
             }}
             className={`mb-4 rounded-xl border-2 border-dashed px-6 py-10 text-center transition ${
               dragOver ? "border-blue-500 bg-blue-50" : "border-slate-300 bg-slate-50"
@@ -702,8 +835,10 @@ export default function Home() {
                 multiple
                 accept=".pdf,.docx,.txt,.md"
                 onChange={(e) => {
-                  if (e.target.files) addFiles(e.target.files);
+                  // ВАЖНО: копия до сброса value — FileList инвалидируется сразу после.
+                  const picked = Array.from(e.target.files ?? []);
                   e.target.value = "";
+                  addFiles(picked);
                 }}
                 className="sr-only"
               />
@@ -922,7 +1057,7 @@ export default function Home() {
 
       <footer className="mt-8 text-center text-xs text-slate-400 no-print">
         ИИ-инструмент подготовки к спору. Не заменяет консультацию практикующего юриста.
-        <br />v0.2.1
+        <br />v0.2.2
       </footer>
     </main>
   );
