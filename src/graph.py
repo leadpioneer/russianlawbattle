@@ -42,6 +42,7 @@ from .agents import judge as judge_agent
 from .agents.base import ROLE_CLAIMANT, ROLE_DEFENDANT, ROLE_JUDGE, SPEAKER_TITLES, Statement
 from .agents.legal_context import VerifiedNorms, build_verified_norms
 from .legal_tools import LawExcerpt
+from .legal.citation_verifier import CitationVerificationResult, repair_citations, verify_citations
 from .legal.evidence_pack import build_evidence_pack_async
 from .legal.issue_extractor import LegalIssues
 from .legal.models import EvidencePack, LegalSource
@@ -180,6 +181,7 @@ class DebateState(TypedDict, total=False):
     legal_issues: LegalIssues | None  # структурированные вопросы дела
     evidence_pack: EvidencePack | None  # собранный до прений набор источников
     evidence_block: str  # готовый prompt-блок Evidence Pack (для всех агентов)
+    citation_results: Annotated[list[tuple[str, CitationVerificationResult]], operator.add]
 
 
 @dataclass(frozen=True)
@@ -199,6 +201,7 @@ class DebateResult:
     stopped: bool = False  # симуляция остановлена пользователем до финала
     usage_log: tuple[tuple[str, str, Any], ...] = ()  # (роль, модель, TokenUsage) за прогон
     evidence_pack: EvidencePack | None = None  # Evidence Pack прений (этап 3)
+    citation_results: tuple[tuple[str, CitationVerificationResult], ...] = ()  # linter ссылок
 
 
 def build_graph(
@@ -484,6 +487,22 @@ def build_graph(
                 payload={"length": len(verdict), "usage": verdict.usage.as_dict()},
             )
         )
+        # Linter правовых ссылок (этап 3, шаг 7): вердикт проходит проверку
+        # против Evidence Pack; при ошибках — один repair-pass.
+        citation_result = verify_citations(verdict, state.get("evidence_pack"))
+        if citation_result.issue_count:
+            repaired = repair_citations(verdict, citation_result, role=ROLE_JUDGE)
+            if repaired and repaired != verdict:
+                verdict = repaired
+                citation_result = verify_citations(verdict, state.get("evidence_pack"))
+        logger.info(
+            "Узел %s: linter ссылок — %s (verified=%d, issues=%d).",
+            NODE_VERDICT,
+            citation_result.overall_status,
+            citation_result.verified_count,
+            citation_result.issue_count,
+        )
+        citation_results.append(("verdict", citation_result))
         logger.info("Узел %s: решение готово (%d симв.).", NODE_VERDICT, len(verdict))
         return {
             "verdict": verdict,
@@ -540,6 +559,22 @@ def build_graph(
                 round=round_number,
                 payload={"target_side": rec.target_side, "prospects": rec.prospects},
             )
+        )
+        # Linter правовых ссылок для рекомендаций (этап 3, шаг 7).
+        rec_citation = verify_citations(rec.text, state.get("evidence_pack"))
+        if rec_citation.issue_count:
+            repaired_rec = repair_citations(rec.text, rec_citation, role=ROLE_JUDGE)
+            if repaired_rec and repaired_rec != rec.text:
+                rec = advisor.Recommendation(
+                    target_side=rec.target_side, side_title=rec.side_title,
+                    prospects=rec.prospects, text=repaired_rec,
+                )
+                rec_citation = verify_citations(rec.text, state.get("evidence_pack"))
+        citation_results.append(("recommendations", rec_citation))
+        logger.info(
+            "Узел %s: linter ссылок рекомендаций — %s.",
+            NODE_RECOMMENDATIONS,
+            rec_citation.overall_status,
         )
         logger.info(
             "Узел %s: рекомендации для %s (перспектива: %s).",
@@ -763,6 +798,7 @@ def run_debate(
         stopped=stopped,
         usage_log=tuple(get_usage_log()),
         evidence_pack=final.get("evidence_pack"),
+        citation_results=tuple(final.get("citation_results", [])),
     )
     logger.info(
         "Симуляция завершена: раундов=%d, завершена судьёй=%s, остановлена=%s, реплик=%d, "

@@ -77,6 +77,40 @@ def render_report(result: DebateResult, generated_at: datetime | None = None) ->
         lines += [f"- {norm.title} [{norm.source_url}]" for norm in result.verified_norms]
         lines.append("")
 
+    if result.citation_results:
+        lines += ["## Проверка правовых ссылок", ""]
+        for section, check in result.citation_results:
+            title = {
+                "verdict": "Итоговое решение судьи",
+                "recommendations": "Рекомендации",
+            }.get(section, section)
+            icon = {"passed": "✅", "warning": "⚠", "failed": "❌"}.get(check.overall_status, "•")
+            lines += [
+                f"### {title} — {icon} {check.overall_status}",
+                "",
+                f"Подтверждённых ссылок: **{check.verified_count}**, проблем: **{check.issue_count}**.",
+                "",
+            ]
+            problems = [c for c in check.checks if c.status != "verified"]
+            if problems:
+                lines += [
+                    "| Ссылка | Статус | Комментарий |",
+                    "|---|---|---|",
+                ]
+                for check_item in problems:
+                    lines.append(
+                        f"| {check_item.citation_text or '—'} | {check_item.status} | "
+                        f"{check_item.message} |"
+                    )
+                lines.append("")
+                if check.overall_status == "failed":
+                    lines.append(
+                        "> ⚠ Ссылки выше не удалось подтвердить. Не используйте их "
+                        "без ручной проверки по официальным источникам."
+                    )
+                    lines.append("")
+        lines.append("")
+
     if result.stopped:
         lines += [
             "> ⚠ **Симуляция остановлена пользователем** — решение неполное, "
