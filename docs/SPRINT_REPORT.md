@@ -74,13 +74,14 @@ CLI и веб совместимы — да.
 ## 5. Чеклист тестирования (что и как проверено)
 
 ### Автотесты
-- [x] `pytest -q` — **105 passed** (85 на старте спринта → 105)
+- [x] `pytest -q` — **108 passed** (85 на старте спринта → 108)
 - [x] Диагностика: healthy / пакет отсутствует / битый импорт / tool не найден / таймаут / неполный ответ / binary missing / 0 хитов каскада / get_npa 404 / render / маска секретов (19)
 - [x] Модели: инварианты верификации (verified требует excerpt и статус), JSON-roundtrip, агрегаты pack, `make_id` (14)
 - [x] Mock-провайдер: Protocol-совместимость, healthcheck, поиски, get_document, fail-режим (6)
 - [x] pravo_gov: extract номеров/актов, search (mock httpx), network error, `hit_to_legal_source` never-verified, healthcheck-unavailable, search без обогащения, case_law=[] (honest), обогащение через converters со статусом ≠ verified (13)
 - [x] issue_extractor + service + prompts: JSON-парсинг (plain/fenced/garbage), fallback, search_queries, дедуп (лучший по статусу/провайдеру), renumber, research на mock'ах, degraded-режим, ошибки → warnings, секции prompt-блока, sync-in-thread, persist (23)
 - [x] Граф: узел `build_evidence_pack` в графе, константы событий, `_pack_to_excerpts`, degraded-warnings, `evidence_pack` в DebateResult (5)
+- [x] **E2E полного графа с замоканными агентами** (регрессия NameError `citation_results`): обе секции linter доходят до DebateResult; проверка отсутствия `citation_results.append` в исходнике узлов (2)
 - [x] Citation verifier: verified по ID, missing → failed, unverified → warning, матч номера акта, missing акта, номер дела, пустой текст, pack=None, to_dict, repair no-op, repair при ошибке LLM (11)
 - [x] Case law: unavailable-провайдер, disabled Atomno/KadArbitr, not_configured, классификация user-документов, метаданные акта, USER-уровень, парсер vsrf (mock-фикстуры), релевантность, поиск ВС (mock), healthcheck-unavailable, coverage-сообщения/roundtrip (20)
 

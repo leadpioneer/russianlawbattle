@@ -502,12 +502,12 @@ def build_graph(
             citation_result.verified_count,
             citation_result.issue_count,
         )
-        citation_results.append(("verdict", citation_result))
         logger.info("Узел %s: решение готово (%d симв.).", NODE_VERDICT, len(verdict))
         return {
             "verdict": verdict,
             "norms_used": _pack_to_excerpts(state.get("evidence_pack")),
             "legal_warnings": _pack_warnings(state.get("evidence_pack"), ROLE_JUDGE, round_number),
+            "citation_results": [("verdict", citation_result)],
         }
 
     def recommendations_node(state: DebateState) -> dict:
@@ -566,11 +566,10 @@ def build_graph(
             repaired_rec = repair_citations(rec.text, rec_citation, role=ROLE_JUDGE)
             if repaired_rec and repaired_rec != rec.text:
                 rec = advisor.Recommendation(
-                    target_side=rec.target_side, side_title=rec.side_title,
+                    target_side=rec.target_side,
                     prospects=rec.prospects, text=repaired_rec,
                 )
                 rec_citation = verify_citations(rec.text, state.get("evidence_pack"))
-        citation_results.append(("recommendations", rec_citation))
         logger.info(
             "Узел %s: linter ссылок рекомендаций — %s.",
             NODE_RECOMMENDATIONS,
@@ -586,6 +585,7 @@ def build_graph(
             "recommendations": rec,
             "norms_used": _pack_to_excerpts(state.get("evidence_pack")),
             "legal_warnings": _pack_warnings(state.get("evidence_pack"), ROLE_JUDGE, round_number),
+            "citation_results": [("recommendations", rec_citation)],
         }
 
     graph = StateGraph(DebateState)
