@@ -30,8 +30,9 @@ logger = logging.getLogger(__name__)
 
 #: Маркер решения судьи в конце ответа (парсится графом).
 _MARKER_RE = re.compile(
-    r"===\s*РЕШЕНИЕ\s+СУДЬИ:\s*(ПРОДОЛЖАТЬ|ЗАВЕРШИТЬ)"
-    r"(?:\s*\(кому:\s*(claimant_lawyer|defendant_lawyer|both)\s*\))?\s*===",
+    r"===\s*РЕШЕНИЕ\s+СУДЬИ:\s*(ПРОДОЛЖАТЬ|ЗАВЕРШИТЬ|ПЕРЕКВАЛИФИКАЦИЯ)"
+    r"(?:\s*\(кому:\s*(claimant_lawyer|defendant_lawyer|both)\s*\))?"
+    r"(?:\s*:\s*([^=]*?))?\s*===",
     re.IGNORECASE,
 )
 
@@ -41,8 +42,16 @@ _JUDGE_MARKER_INSTRUCTION = """\
 === РЕШЕНИЕ СУДЬИ: ПРОДОЛЖАТЬ (кому: defendant_lawyer) ===
 === РЕШЕНИЕ СУДЬИ: ПРОДОЛЖАТЬ (кому: both) ===
 === РЕШЕНИЕ СУДЬИ: ЗАВЕРШИТЬ ===
+=== РЕШЕНИЕ СУДЬИ: ПЕРЕКВАЛИФИКАЦИЯ: <краткое описание нового характера спора> ===
 ПРОДОЛЖАТЬ — если требуется уточнение или новые аргументы (укажи, кому адресован вопрос);
-ЗАВЕРШИТЬ — если материалов и аргументов достаточно для решения."""
+ЗАВЕРШИТЬ — если материалов и аргументов достаточно для решения;
+ПЕРЕКВАЛИФИКАЦИЯ — если в прениях выяснилось, что ХАРАКТЕР СПОРА изменился и применить
+первоначальную нормативную базу нельзя. Пример: по делу о защите прав потребителя
+выяснилось, что истец использовал товар не для личных нужд, а для извлечения коммерческой
+прибыли (перепродажа, аренда, предпринимательство) — Закон о защите прав потребителей
+неприменим, спор должен рассматриваться по общим нормам ГК РФ. В маркере после двоеточия
+кратко укажи новый характер спора. Раунд не прекращай: дай оценку сказанному и направь
+стороны на обсуждение нового характера спора — нормативная база будет собрана заново."""
 
 
 @dataclass(frozen=True)
@@ -52,6 +61,8 @@ class JudgeDecision:
     continues: bool  # True — ещё раунд; False — переход к итоговому решению
     addressee: str  # кому вопрос: claimant_lawyer / defendant_lawyer / both ("" если завершение)
     question: str  # текст судьи без строки-маркера
+    requalify: bool = False  # True — характер спора изменился, нужен повторный research
+    requalify_reason: str = ""  # новый характер спора (из маркера после двоеточия)
 
 
 def build_review_prompt(cfg: Config, materials: CaseMaterials) -> str:
@@ -79,15 +90,26 @@ def parse_judge_decision(text: str) -> JudgeDecision:
         return JudgeDecision(continues=True, addressee="both", question=text.strip())
     verb = match.group(1).upper()
     addressee = (match.group(2) or "").lower()
+    reason = (match.group(3) or "").strip()
     question = text[: match.start()].strip()
-    decision = JudgeDecision(
-        continues=(verb == "ПРОДОЛЖАТЬ"),
-        addressee=addressee if verb == "ПРОДОЛЖАТЬ" else "",
-        question=question,
-    )
+    if verb == "ПЕРЕКВАЛИФИКАЦИЯ":
+        decision = JudgeDecision(
+            continues=True,
+            addressee="both",
+            question=question,
+            requalify=True,
+            requalify_reason=reason,
+        )
+    else:
+        decision = JudgeDecision(
+            continues=(verb == "ПРОДОЛЖАТЬ"),
+            addressee=addressee if verb == "ПРОДОЛЖАТЬ" else "",
+            question=question,
+        )
     logger.info(
         "Решение судьи: %s (кому: %s).",
-        "ПРОДОЛЖАТЬ" if decision.continues else "ЗАВЕРШИТЬ",
+        "ПЕРЕКВАЛИФИКАЦИЯ" if decision.requalify
+        else ("ПРОДОЛЖАТЬ" if decision.continues else "ЗАВЕРШИТЬ"),
         decision.addressee or "—",
     )
     return decision

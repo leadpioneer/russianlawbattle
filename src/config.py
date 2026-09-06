@@ -53,6 +53,7 @@ _ALLOWED_KEYS: set[str] = {
     "max_context_tokens",
     "llm_params",
     "legal_mcp",
+    "legal_research",
 }
 
 
@@ -75,6 +76,7 @@ class Config:
     max_context_tokens: int = DEFAULT_MAX_CONTEXT_TOKENS
     llm_params: dict[str, Any] = field(default_factory=dict)
     legal_mcp: dict[str, Any] = field(default_factory=dict)
+    legal_research: dict[str, Any] = field(default_factory=dict)
     project_root: Path = PROJECT_ROOT
 
     # --- пути, производные от корня проекта --------------------------------
@@ -240,6 +242,21 @@ def load_config(config_path: str | Path = DEFAULT_CONFIG_PATH) -> Config:
             "Ключ «legal_mcp» должен быть словарём (enabled, command, limit) — "
             "настройки MCP-сервера норм права."
         )
+    legal_research = raw.get("legal_research", {})
+    if not isinstance(legal_research, dict):
+        raise ConfigError(
+            "Ключ «legal_research» должен быть словарём (web_search, search_model) — "
+            "настройки правового исследования (веб-поиск)."
+        )
+    web_search = legal_research.get("web_search", True)
+    if not isinstance(web_search, bool):
+        raise ConfigError("Ключ «legal_research.web_search» должен быть true/false.")
+    search_model = legal_research.get("search_model")
+    if search_model is not None and (not isinstance(search_model, str) or not search_model.strip()):
+        raise ConfigError(
+            "Ключ «legal_research.search_model» должен быть непустой строкой — "
+            "алиасом поисковой модели роутера (например perplexity/sonar)."
+        )
 
     logger.info("Конфигурация загружена: %s", path.resolve())
     return Config(
@@ -254,5 +271,9 @@ def load_config(config_path: str | Path = DEFAULT_CONFIG_PATH) -> Config:
         max_context_tokens=max_context_tokens,
         llm_params=dict(llm_params),
         legal_mcp=dict(legal_mcp),
+        legal_research={
+            "web_search": web_search,
+            **({"search_model": search_model.strip()} if search_model else {}),
+        },
         project_root=PROJECT_ROOT,
     )

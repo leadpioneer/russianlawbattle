@@ -180,6 +180,8 @@ class DebateState(TypedDict, total=False):
     norms_used: Annotated[list[LawExcerpt], operator.add]  # подтверждённые нормы за прогон
     legal_warnings: Annotated[list[str], operator.add]  # предупреждения о неподтверждённых нормах
     stopped: bool  # пользователь нажал «Остановить» (частичный результат)
+    research_runs: int  # сколько раз собирался Evidence Pack (повторы — переквалификация)
+    requalifications: Annotated[list[str], operator.add]  # причины переквалификаций дела
     # Правовой research layer (этап 3):
     legal_issues: LegalIssues | None  # структурированные вопросы дела
     evidence_pack: EvidencePack | None  # собранный до прений набор источников
@@ -205,6 +207,8 @@ class DebateResult:
     usage_log: tuple[tuple[str, str, Any], ...] = ()  # (роль, модель, TokenUsage) за прогон
     evidence_pack: EvidencePack | None = None  # Evidence Pack прений (этап 3)
     citation_results: tuple[tuple[str, CitationVerificationResult], ...] = ()  # linter ссылок
+    requalifications: tuple[str, ...] = ()  # переквалификации дела в ходе прений
+    research_runs: int = 1  # сколько раз собирался Evidence Pack
 
 
 def build_graph(
@@ -251,15 +255,46 @@ def build_graph(
     def legal_research(state: DebateState) -> dict:
         """Узел research: вопросы дела → провайдеры → Evidence Pack (этап 3).
 
-        Выполняется ОДИН раз до прений; общий Evidence Pack получают все три
-        роли. Ошибка исследования деградирует (пустой pack + warning), но не
-        роняет симуляцию.
+        Выполняется до прений и повторно при переквалификации дела судьёй
+        (новый характер спора → нормативная база собирается заново). Ошибка
+        исследования деградирует (пустой pack + warning), но не роняет
+        симуляцию.
         """
         if stopped_now():
             return {"stopped": True}
         emit(DebateEvent(EVENT_LEGAL_RESEARCH_STARTED))
         materials: CaseMaterials = state["materials"]
         free_text = (materials.context or "").strip() or None
+        runs = state.get("research_runs", 0) + 1
+        requalified = state.get("requalifications", [])
+        if requalified:
+            # Повторный сбор под новый характер спора: к запросу добавляем
+            # причины переквалификации и последние реплики прений.
+            history_tail = "\n".join(
+                f"[{s.speaker}] {s.text[:400]}"
+                for s in state.get("history", [])[-2:]
+            )
+            requal_context = "\n".join(requalified)
+            free_text = (
+                f"{free_text or ''}\n\nВНИМАНИЕ: характер спора изменился в ходе "
+                f"прений — переквалификация: {requal_context}.\n"
+                f"Последние реплики прений:\n{history_tail}"
+            )
+            logger.info(
+                "Узел %s: повторный сбор Evidence Pack (%d-й) после переквалификации: %s",
+                NODE_RESEARCH,
+                runs,
+                requal_context[:200],
+            )
+            emit(
+                DebateEvent(
+                    EVENT_LEGAL_RESEARCH_STARTED,
+                    payload={
+                        "requalification": requal_context,
+                        "run": runs,
+                    },
+                )
+            )
         try:
             pack, issues = _run_evidence_pack(
                 cfg, materials, free_text_query=free_text, emit=emit
@@ -287,6 +322,7 @@ def build_graph(
             "legal_issues": issues,
             "evidence_pack": pack,
             "evidence_block": block,
+            "research_runs": runs,
         }
 
     def claimant_turn(state: DebateState) -> dict:
@@ -412,6 +448,14 @@ def build_graph(
                 round=round_number,
                 continues=decision.continues,
                 addressee=decision.addressee,
+                payload=(
+                    {
+                        "requalify": True,
+                        "requalify_reason": decision.requalify_reason,
+                    }
+                    if decision.requalify
+                    else {}
+                ),
             )
         )
         logger.info(
@@ -420,14 +464,30 @@ def build_graph(
             "ПРОДОЛЖАТЬ" if decision.continues else "ЗАВЕРШИТЬ",
             decision.addressee or "—",
         )
-        return {"history": [statement], "judge_decision": decision}
+        return {
+            "history": [statement],
+            "judge_decision": decision,
+            **({"requalifications": [decision.requalify_reason]} if decision.requalify else {}),
+        }
 
     def should_continue(state: DebateState) -> str:
-        """Условный переход после судьи: новый раунд, итоговое решение или стоп."""
+        """Условный переход после судьи: research/новый раунд/решение/стоп."""
         if state.get("stopped"):
             logger.info("Переход: %s -> END (остановлено пользователем).", NODE_JUDGE)
             return "__end__"
         decision = state.get("judge_decision")
+        if (
+            decision is not None
+            and decision.requalify
+            and state.get("research_runs", 0) <= MAX_REQUALIFICATIONS
+        ):
+            logger.info(
+                "Переход: %s -> %s (переквалификация: %s).",
+                NODE_JUDGE,
+                NODE_RESEARCH,
+                decision.requalify_reason[:120],
+            )
+            return NODE_RESEARCH
         if decision is not None and not decision.continues:
             logger.info("Переход: %s -> %s (судья решил завершить).", NODE_JUDGE, NODE_VERDICT)
             return NODE_VERDICT
@@ -608,7 +668,12 @@ def build_graph(
     graph.add_conditional_edges(
         NODE_JUDGE,
         should_continue,
-        {NODE_CLAIMANT: NODE_CLAIMANT, NODE_VERDICT: NODE_VERDICT, END: END},
+        {
+            NODE_CLAIMANT: NODE_CLAIMANT,
+            NODE_RESEARCH: NODE_RESEARCH,  # переквалификация дела судьёй
+            NODE_VERDICT: NODE_VERDICT,
+            END: END,
+        },
     )
     graph.add_edge(NODE_VERDICT, NODE_RECOMMENDATIONS)
     graph.add_edge(NODE_RECOMMENDATIONS, END)
@@ -649,6 +714,10 @@ def _load_case_cached(cfg: Config) -> CaseMaterials:
     if key not in _case_cache:
         _case_cache[key] = load_case(cfg)
     return _case_cache[key]
+
+
+#: Максимум переквалификаций за процесс (защита от циклов research → прения).
+MAX_REQUALIFICATIONS = 2
 
 
 def _run_evidence_pack(
@@ -811,6 +880,10 @@ def run_debate(
         usage_log=tuple(get_usage_log()),
         evidence_pack=final.get("evidence_pack"),
         citation_results=tuple(final.get("citation_results", [])),
+        requalifications=tuple(
+            r for r in final.get("requalifications", []) if r
+        ),
+        research_runs=final.get("research_runs", 1),
     )
     logger.info(
         "Симуляция завершена: раундов=%d, завершена судьёй=%s, остановлена=%s, реплик=%d, "

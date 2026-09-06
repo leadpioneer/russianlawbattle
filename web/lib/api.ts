@@ -35,6 +35,7 @@ export interface DebateEvent {
   continues?: boolean;
   addressee?: string;
   payload?: Record<string, unknown>;
+  requalify?: boolean; // судья объявил переквалификацию дела
 }
 
 // --- Правовой research layer (этап 3): payload-типы новых событий ----------

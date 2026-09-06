@@ -48,6 +48,12 @@ def render_report(result: DebateResult, generated_at: datetime | None = None) ->
     if cfg.llm_params:
         lines.append(f"- **Доп. параметры запросов:** `{cfg.llm_params}`")
     lines.append(f"- **Сторона для рекомендаций:** {result.target_side}")
+    if result.requalifications:
+        lines.append(
+            f"- **⚖ Дело переквалифицировано в ходе прений** ({len(result.requalifications)}×, "
+            f"правовое исследование выполнено {result.research_runs}×): "
+            + "; ".join(result.requalifications)
+        )
     if result.legal_warning:
         lines.append(
             f"- **⚠ Предупреждение:** {result.legal_warning} — ссылки модели на нормы "

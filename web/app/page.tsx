@@ -249,6 +249,10 @@ export default function Home() {
   const nextId = useRef(1);
   // Живой счётчик расхода: суммарные токены за прогон (обновляется по agent_end).
   const [liveUsage, setLiveUsage] = useState({ tokens: 0, calls: 0 });
+  // Идёт подготовка законодательной базы (Evidence Pack): от
+  // legal_research_started до evidence_pack_ready/первого agent_start.
+  const [researching, setResearching] = useState(false);
+  const [researchFound, setResearchFound] = useState(0);
   const socketRef = useRef<WebSocket | null>(null);
 
   // --- итог ---
@@ -330,12 +334,15 @@ export default function Home() {
       setReport(null);
       setTyping(false);
       setLiveUsage({ tokens: 0, calls: 0 });
+      setResearching(false);
+      setResearchFound(0);
       await startRun(sessionId);
       const socket = connectSessionSocket(
         sessionId,
         (event: DebateEvent) => {
           if (event.type === "agent_start") {
             setTyping(true);
+            setResearching(false);
             setMessages((prev) => [
               ...prev,
               {
@@ -378,8 +385,26 @@ export default function Home() {
               updated[updated.length - 1] = { ...last, text: event.text ?? last.text, done: true };
               return updated;
             });
+          } else if (event.type === "legal_research_started") {
+            setResearching(true);
+            setResearchFound(0);
+          } else if (event.type === "legal_source_found") {
+            setResearchFound((prev) => prev + 1);
+          } else if (event.type === "evidence_pack_ready") {
+            setResearching(false);
           } else if (event.type === "judge_decision") {
-            const verb = event.continues ? "ПРОДОЛЖАТЬ" : "ЗАВЕРШИТЬ";
+            const verb = event.requalify
+              ? "ПЕРЕКВАЛИФИКАЦИЯ"
+              : event.continues
+                ? "ПРОДОЛЖАТЬ"
+                : "ЗАВЕРШИТЬ";
+            const detail = event.requalify
+              ? event.payload?.requalify_reason
+                ? `: ${String(event.payload.requalify_reason)}`
+                : ""
+              : event.addressee && event.addressee !== "both"
+                ? ` → ${event.addressee}`
+                : "";
             setMessages((prev) => [
               ...prev,
               {
@@ -388,7 +413,7 @@ export default function Home() {
                 role: "system",
                 round: event.round ?? 0,
                 model: "",
-                text: `${verb}${event.addressee && event.addressee !== "both" ? ` → ${event.addressee}` : ""}`,
+                text: `${verb}${detail}`,
                 done: true,
               },
             ]);
@@ -940,6 +965,19 @@ export default function Home() {
       {/* --- ЭКРАН 3: ПРЯМОЙ ЭФИР --- */}
       {stage === "live" && (
         <section className="flex flex-col gap-3">
+          {researching && (
+            <div className="flex items-center gap-3 rounded-xl border border-amber-300 bg-amber-50 px-4 py-3 shadow-sm">
+              <span className="flex gap-1">
+                <span className="h-2 w-2 animate-bounce rounded-full bg-amber-500" />
+                <span className="h-2 w-2 animate-bounce rounded-full bg-amber-500 [animation-delay:150ms]" />
+                <span className="h-2 w-2 animate-bounce rounded-full bg-amber-500 [animation-delay:300ms]" />
+              </span>
+              <span className="text-sm font-medium text-amber-800">
+                ⚖ Идёт подготовка законодательной базы…
+                {researchFound > 0 && ` найдено источников: ${researchFound}`}
+              </span>
+            </div>
+          )}
           <div className="flex items-center justify-between rounded-xl border border-slate-200 bg-white px-4 py-3 shadow-sm">
             <div className="flex items-center gap-4">
               <span className="text-sm font-medium">Прямой эфир прений</span>

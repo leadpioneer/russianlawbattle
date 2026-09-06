@@ -82,16 +82,34 @@ def build_providers(configs: list[ProviderConfig]) -> list[tuple[ProviderConfig,
 
 
 def default_provider_configs() -> list[ProviderConfig]:
-    """Дефолтная конфигурация (пока секция legal_research не введена в шаге 6)."""
-    return [
+    """Дефолтная конфигурация провайдеров правового исследования.
+
+    sonar (веб-поиск) включается флагом ``legal_research.web_search`` в
+    config.yaml (по умолчанию — включён).
+    """
+    configs = [
         ProviderConfig(name="pravo_gov", enabled=True, priority=100, timeout_seconds=25.0),
         ProviderConfig(name="supreme_court_official", enabled=True, priority=90, timeout_seconds=25.0),
+    ]
+    if _web_search_enabled():
         # Веб-поиск через sonar (роутер): дополняет официальные API практикой
         # нижестоящих судов. Результаты — partially_verified (сверка вручную).
-        ProviderConfig(
-            name="sonar_web_search", enabled=True, priority=80, timeout_seconds=90.0
-        ),
-    ]
+        configs.append(
+            ProviderConfig(
+                name="sonar_web_search", enabled=True, priority=80, timeout_seconds=90.0
+            )
+        )
+    return configs
+
+
+def _web_search_enabled() -> bool:
+    """Флаг ``legal_research.web_search`` из config.yaml (по умолчанию True)."""
+    try:
+        from ..config import load_config
+
+        return bool(load_config().legal_research.get("web_search", True))
+    except Exception:  # noqa: BLE001 — конфиг недоступен (тесты) → дефолт
+        return True
 
 
 class LegalResearchService:

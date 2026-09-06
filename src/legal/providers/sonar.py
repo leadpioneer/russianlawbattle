@@ -138,8 +138,23 @@ class SonarWebSearchProvider:
     ) -> None:
         self._base_url = base_url  # лениво из конфига (иначе тесты не подменить)
         self._api_key = api_key
-        self._model = model or os.getenv("SONAR_MODEL", DEFAULT_SONAR_MODEL)
+        # Приоритет алиаса: явный аргумент > config.yaml (search_model) >
+        # env SONAR_MODEL > дефолт.
+        self._model = model or self._model_from_config() or os.getenv(
+            "SONAR_MODEL", DEFAULT_SONAR_MODEL
+        )
         self._post = post  # хук для тестов: Callable[[str, str], tuple[str, TokenUsage]]
+
+    @staticmethod
+    def _model_from_config() -> str | None:
+        """Алиас поисковой модели из config.yaml (legal_research.search_model)."""
+        try:
+            from ...config import load_config
+
+            model = load_config().legal_research.get("search_model")
+            return model.strip() if isinstance(model, str) and model.strip() else None
+        except Exception:  # noqa: BLE001 — конфиг опционален (тесты без config.yaml)
+            return None
 
     def _credentials(self) -> tuple[str, str]:
         if self._base_url is not None and self._api_key is not None:
