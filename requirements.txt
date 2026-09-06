@@ -26,3 +26,8 @@ mcp>=1.2.0
 # (github.com/AlsKozlov/ru-legal, mcps/pravo) и положен в wheels/ для offline-установки.
 # Обновить wheel: pip wheel "git+https://github.com/AlsKozlov/ru-legal.git#subdirectory=mcps/pravo" -w wheels --no-deps
 ./wheels/pravo_mcp-0.1.0-py3-none-any.whl
+
+# Тесты (этап 3): unit/integration-тесты новой бизнес-логики
+pytest>=8.0.0
+pytest-asyncio>=0.24.0
+
