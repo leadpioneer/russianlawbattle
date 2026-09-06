@@ -19,3 +19,8 @@ python-docx>=1.1.2
 fastapi>=0.115.0
 uvicorn[standard]>=0.32.0
 python-multipart>=0.0.12
+
+# MCP: актуальные нормы права через pravo.gov.ru (этап 2, шаг 4)
+mcp>=1.2.0
+# pravo-mcp не опубликован на PyPI — ставим из исходников (subdirectory-пакет репозитория)
+pravo-mcp @ git+https://github.com/AlsKozlov/ru-legal.git#subdirectory=mcps/pravo

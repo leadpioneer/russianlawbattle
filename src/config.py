@@ -52,6 +52,7 @@ _ALLOWED_KEYS: set[str] = {
     "max_rounds",
     "max_context_tokens",
     "llm_params",
+    "legal_mcp",
 }
 
 
@@ -73,6 +74,7 @@ class Config:
     max_rounds: int = DEFAULT_MAX_ROUNDS
     max_context_tokens: int = DEFAULT_MAX_CONTEXT_TOKENS
     llm_params: dict[str, Any] = field(default_factory=dict)
+    legal_mcp: dict[str, Any] = field(default_factory=dict)
     project_root: Path = PROJECT_ROOT
 
     # --- пути, производные от корня проекта --------------------------------
@@ -232,6 +234,12 @@ def load_config(config_path: str | Path = DEFAULT_CONFIG_PATH) -> Config:
             "Ключ «llm_params» должен быть словарём доп. параметров запроса "
             "(например: max_tokens, reasoning)."
         )
+    legal_mcp = raw.get("legal_mcp", {})
+    if not isinstance(legal_mcp, dict):
+        raise ConfigError(
+            "Ключ «legal_mcp» должен быть словарём (enabled, command, limit) — "
+            "настройки MCP-сервера норм права."
+        )
 
     logger.info("Конфигурация загружена: %s", path.resolve())
     return Config(
@@ -245,5 +253,6 @@ def load_config(config_path: str | Path = DEFAULT_CONFIG_PATH) -> Config:
         max_rounds=max_rounds,
         max_context_tokens=max_context_tokens,
         llm_params=dict(llm_params),
+        legal_mcp=dict(legal_mcp),
         project_root=PROJECT_ROOT,
     )

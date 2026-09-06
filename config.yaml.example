@@ -36,3 +36,17 @@ max_context_tokens: 12000
 # llm_params:
 #   max_tokens: 2500
 #   reasoning: {"effort": "low"}
+
+# MCP-сервер актуальных норм права (pravo.gov.ru) — см. src/legal_tools.py.
+# Требует установленного пакета pravo-mcp (ставится из requirements.txt).
+# enabled: false — полностью отключить поиск норм (агенты будут помечать
+# ссылки как «требует проверки»).
+# legal_mcp:
+#   enabled: true
+#   limit: 3
+#   command:  # по умолчанию — python вашего venv + pravo_mcp.server (stdio)
+#     - ".venv/Scripts/python.exe"
+#     - "-X"
+#     - "utf8"
+#     - "-m"
+#     - "pravo_mcp.server"
