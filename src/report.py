@@ -77,6 +77,40 @@ def render_report(result: DebateResult, generated_at: datetime | None = None) ->
         lines += [f"- {norm.title} [{norm.source_url}]" for norm in result.verified_norms]
         lines.append("")
 
+    if result.stopped:
+        lines += [
+            "> ⚠ **Симуляция остановлена пользователем** — решение неполное, "
+            "рекомендации не формировались.",
+            "",
+        ]
+
+    if result.usage_log:
+        lines += ["## Потребление ресурсов", ""]
+        lines += [
+            "| # | Роль | Модель | Вход | Выход | Кэш | Токенов всего |",
+            "|---|---|---|---:|---:|---:|---:|",
+        ]
+        for index, (role, model, usage) in enumerate(result.usage_log, start=1):
+            lines.append(
+                f"| {index} | {role} | `{model}` | {usage.input_tokens} | "
+                f"{usage.output_tokens} | {usage.cached_tokens} | {usage.total_tokens} |"
+            )
+        totals = {
+            "input": sum(u.input_tokens for _, _, u in result.usage_log),
+            "output": sum(u.output_tokens for _, _, u in result.usage_log),
+            "cached": sum(u.cached_tokens for _, _, u in result.usage_log),
+            "total": sum(u.total_tokens for _, _, u in result.usage_log),
+        }
+        lines += [
+            f"| | **Итого** | | **{totals['input']}** | **{totals['output']}** | "
+            f"**{totals['cached']}** | **{totals['total']}** |",
+            "",
+        ]
+        if any(role == "judge" for role, _, _ in result.usage_log):
+            lines.append("*Примечание: расходы на формулирование запросов норм права "
+                         "и суммаризацию входят в строки с ролью соответствующего агента.*")
+        lines.append("")
+
     if result.recommendations is not None:
         rec = result.recommendations
         lines += [

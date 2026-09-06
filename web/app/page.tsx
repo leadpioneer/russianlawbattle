@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { DebateEvent, DefaultsData, TargetSide } from "@/lib/api";
-import { API_BASE, checkHealth, connectSessionSocket, createSession, fetchDefaults, fetchReport, reportDownloadUrl, startRun, uploadCase } from "@/lib/api";
+import { API_BASE, checkHealth, connectSessionSocket, createSession, fetchDefaults, fetchReport, reportDownloadUrl, startRun, stopDebate, uploadCase } from "@/lib/api";
 
 /** Ключ localStorage с настройками формы (восстанавливаются при следующем открытии). */
 const SETTINGS_KEY = "court-sim-settings-v1";
@@ -247,6 +247,9 @@ export default function Home() {
   const [typing, setTyping] = useState(false);
   const feedRef = useRef<HTMLDivElement>(null);
   const nextId = useRef(1);
+  // Живой счётчик расхода: суммарные токены за прогон (обновляется по agent_end).
+  const [liveUsage, setLiveUsage] = useState({ tokens: 0, calls: 0 });
+  const socketRef = useRef<WebSocket | null>(null);
 
   // --- итог ---
   const [report, setReport] = useState<Awaited<ReturnType<typeof fetchReport>> | null>(null);
@@ -325,8 +328,9 @@ export default function Home() {
       setMessages([]);
       setReport(null);
       setTyping(false);
+      setLiveUsage({ tokens: 0, calls: 0 });
       await startRun(sessionId);
-      connectSessionSocket(
+      const socket = connectSessionSocket(
         sessionId,
         (event: DebateEvent) => {
           if (event.type === "agent_start") {
@@ -356,6 +360,16 @@ export default function Home() {
             scrollFeed();
           } else if (event.type === "agent_end") {
             setTyping(false);
+            // Живой счётчик расхода токенов (usage из payload agent_end).
+            const usage = (event.payload?.usage ?? null) as
+              | { total_tokens?: number }
+              | null;
+            if (usage?.total_tokens) {
+              setLiveUsage((prev) => ({
+                tokens: prev.tokens + (usage.total_tokens ?? 0),
+                calls: prev.calls + 1,
+              }));
+            }
             setMessages((prev) => {
               if (!prev.length) return prev;
               const updated = [...prev];
@@ -382,19 +396,36 @@ export default function Home() {
           }
         },
         async () => {
-          // Поток закрыт: забираем отчёт (409 = сессия завершилась ошибкой)
+          // Поток закрыт: забираем отчёт (409 = сессия завершилась ошибкой/остановлена)
+          socketRef.current = null;
           try {
             const data = await fetchReport(sessionId);
             setReport(data);
             setStage("final");
-          } catch (err) {
-            setError(err instanceof Error ? err.message : String(err));
+          } catch {
+            // Сессия остановлена пользователем — возвращаемся к материалам дела.
+            setStage("upload");
           }
         },
       );
+      socketRef.current = socket;
     },
     [scrollFeed],
   );
+
+  /** Остановить генерацию и вернуться к материалам дела. */
+  const handleStop = useCallback(async () => {
+    const sessionId = sessionIdRef.current;
+    if (!sessionId) return;
+    setBusy(true);
+    try {
+      await stopDebate(sessionId); // сессия перейдёт в stopped, WS закроется сам
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  }, []);
 
   /** Добавить файлы (drag-and-drop или проводник) с клиентской фильтрацией. */
   const addFiles = useCallback((incoming: File[]) => {
@@ -907,17 +938,34 @@ export default function Home() {
       {stage === "live" && (
         <section className="flex flex-col gap-3">
           <div className="flex items-center justify-between rounded-xl border border-slate-200 bg-white px-4 py-3 shadow-sm">
-            <span className="text-sm font-medium">Прямой эфир прений</span>
-            {typing && (
-              <span className="flex items-center gap-2 text-sm text-slate-500">
-                <span className="flex gap-1">
-                  <span className="h-2 w-2 animate-bounce rounded-full bg-slate-400" />
-                  <span className="h-2 w-2 animate-bounce rounded-full bg-slate-400 [animation-delay:150ms]" />
-                  <span className="h-2 w-2 animate-bounce rounded-full bg-slate-400 [animation-delay:300ms]" />
+            <div className="flex items-center gap-4">
+              <span className="text-sm font-medium">Прямой эфир прений</span>
+              {liveUsage.calls > 0 && (
+                <span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-medium text-slate-600">
+                  🪙 {liveUsage.tokens.toLocaleString("ru-RU")} токенов · {liveUsage.calls} вызовов
                 </span>
-                печатает…
-              </span>
-            )}
+              )}
+            </div>
+            <div className="flex items-center gap-3">
+              {typing && (
+                <span className="flex items-center gap-2 text-sm text-slate-500">
+                  <span className="flex gap-1">
+                    <span className="h-2 w-2 animate-bounce rounded-full bg-slate-400" />
+                    <span className="h-2 w-2 animate-bounce rounded-full bg-slate-400 [animation-delay:150ms]" />
+                    <span className="h-2 w-2 animate-bounce rounded-full bg-slate-400 [animation-delay:300ms]" />
+                  </span>
+                  печатает…
+                </span>
+              )}
+              <button
+                type="button"
+                disabled={busy}
+                onClick={handleStop}
+                className="rounded-lg border border-red-300 bg-red-50 px-4 py-2 text-sm font-medium text-red-700 transition hover:bg-red-100 disabled:opacity-50"
+              >
+                ⏹ Остановить
+              </button>
+            </div>
           </div>
           <div ref={feedRef} className="flex max-h-[70vh] flex-col gap-3 overflow-y-auto pr-1">
             {messages.map((message) => (
@@ -995,6 +1043,61 @@ export default function Home() {
             )}
           </div>
 
+          {report.stopped && (
+            <div className="rounded-xl border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+              ⚠ Симуляция была остановлена вами — решение неполное.
+            </div>
+          )}
+
+          {report.cost_summary && report.cost_summary.calls.length > 0 && (
+            <article className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
+              <div className="mb-3 flex flex-wrap items-baseline justify-between gap-2">
+                <h3 className="text-base font-bold">Потребление ресурсов</h3>
+                <span className="text-sm text-slate-600">
+                  🪙 {report.cost_summary.totals.total_tokens.toLocaleString("ru-RU")} токенов
+                  {report.cost_summary.cost_available && report.cost_summary.total_cost_usd !== null && (
+                    <> · 💰 ≈ ${report.cost_summary.total_cost_usd.toFixed(4)}</>
+                  )}
+                </span>
+              </div>
+              <div className="overflow-x-auto">
+                <table className="w-full text-xs">
+                  <thead>
+                    <tr className="border-b border-slate-200 text-left text-slate-500">
+                      <th className="py-1.5 pr-3 font-medium">#</th>
+                      <th className="py-1.5 pr-3 font-medium">Роль</th>
+                      <th className="py-1.5 pr-3 font-medium">Вход</th>
+                      <th className="py-1.5 pr-3 font-medium">Выход</th>
+                      <th className="py-1.5 pr-3 font-medium">Кэш</th>
+                      <th className="py-1.5 pr-3 font-medium">Всего</th>
+                      <th className="py-1.5 font-medium">Цена</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {report.cost_summary.calls.map((call, index) => (
+                      <tr key={index} className="border-b border-slate-100">
+                        <td className="py-1.5 pr-3">{index + 1}</td>
+                        <td className="py-1.5 pr-3">{call.role}</td>
+                        <td className="py-1.5 pr-3">{call.usage.input_tokens}</td>
+                        <td className="py-1.5 pr-3">{call.usage.output_tokens}</td>
+                        <td className="py-1.5 pr-3">{call.usage.cached_tokens}</td>
+                        <td className="py-1.5 pr-3 font-medium">{call.usage.total_tokens}</td>
+                        <td className="py-1.5">
+                          {call.cost_usd !== null ? `$${call.cost_usd.toFixed(5)}` : "—"}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              {!report.cost_summary.cost_available && (
+                <p className="mt-2 text-xs text-slate-400">
+                  Цены от роутера не получены — стоимость недоступна, показаны только токены.
+                </p>
+              )}
+            </article>
+          )}
+
           {report.recommendations && (
             <article className="rounded-xl border-2 border-emerald-500 bg-emerald-50 p-5 shadow-sm">
               <div className="mb-2 flex flex-wrap items-baseline justify-between gap-2">
@@ -1057,7 +1160,7 @@ export default function Home() {
 
       <footer className="mt-8 text-center text-xs text-slate-400 no-print">
         ИИ-инструмент подготовки к спору. Не заменяет консультацию практикующего юриста.
-        <br />v0.2.2
+        <br />v0.3.0
       </footer>
     </main>
   );

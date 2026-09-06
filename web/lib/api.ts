@@ -44,6 +44,32 @@ export interface NormExcerpt {
   url: string;
 }
 
+export interface UsageEntry {
+  role: string;
+  model: string;
+  usage: {
+    input_tokens: number;
+    output_tokens: number;
+    cached_tokens: number;
+    reasoning_tokens: number;
+    total_tokens: number;
+  };
+  cost_usd: number | null;
+}
+
+export interface CostSummary {
+  calls: UsageEntry[];
+  totals: {
+    input_tokens: number;
+    output_tokens: number;
+    cached_tokens: number;
+    reasoning_tokens: number;
+    total_tokens: number;
+  };
+  total_cost_usd: number | null;
+  cost_available: boolean;
+}
+
 export interface Recommendation {
   target_side: string;
   side_title: string;
@@ -67,6 +93,8 @@ export interface ReportData {
   verified_norms: NormExcerpt[];
   legal_warning: string | null;
   recommendations: Recommendation | null;
+  stopped: boolean;
+  cost_summary: CostSummary | null;
 }
 
 export interface DefaultsData {
@@ -145,6 +173,11 @@ export async function uploadCase(
 
 export async function startRun(sessionId: string): Promise<void> {
   await ensureOk(await safeFetch(`${API_BASE}/api/run/${sessionId}`, { method: "POST" }));
+}
+
+/** Кооперативная остановка симуляции (флаг проверяется между LLM-вызовами). */
+export async function stopDebate(sessionId: string): Promise<void> {
+  await ensureOk(await safeFetch(`${API_BASE}/api/stop/${sessionId}`, { method: "POST" }));
 }
 
 export async function fetchReport(sessionId: string): Promise<ReportData> {

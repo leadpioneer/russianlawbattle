@@ -313,8 +313,25 @@ def run_debate_endpoint(session_id: str) -> dict:
             encoding="utf-8",
         )
         logger.info("Сессия %s: контекст дела сгенерирован из %d документов.", session_id, len(documents))
+    # Прайсы для оценки денег: если роутер их не отдал — сводка будет без стоимости.
+    from .llm_client import fetch_model_pricing
+
+    session.pricing = fetch_model_pricing(session.config.api_base_url, session.config.api_key)
     run_session_in_thread(session)
     return {"session_id": session.id, "status": session.status}
+
+
+@app.post("/api/stop/{session_id}")
+def stop_debate_endpoint(session_id: str) -> dict:
+    """Кооперативная остановка симуляции: флаг проверяется между LLM-вызовами."""
+    session = _get_session_or_404(session_id)
+    if not session.request_stop():
+        raise HTTPException(
+            status_code=409,
+            detail=f"Симуляция не выполняется (статус: {session.status}) — останавливать нечего.",
+        )
+    logger.info("Сессия %s: запрошена остановка пользователем.", session_id)
+    return {"session_id": session.id, "status": "stopping"}
 
 
 @app.websocket("/ws/session/{session_id}")
@@ -364,6 +381,9 @@ def report(session_id: str, format: str = "md") -> Any:
         result = session.result
         rec = result.recommendations
         return {
+            **session.public_info(),
+            "stopped": result.stopped,
+            "cost_summary": session.cost_summary,
             **session.public_info(),
             "params": {
                 "jurisdiction": session.config.jurisdiction,

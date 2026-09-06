@@ -68,6 +68,11 @@ def run(
         f"{'решением судьи' if result.finished_by_judge else 'лимитом раундов'}."
     )
     console.print(f"Реплик: {len(result.history)}; вердикт: {len(result.verdict)} символов.")
+    if result.usage_log:
+        total_tokens = sum(u.total_tokens for _, _, u in result.usage_log)
+        console.print(f"Вызовов LLM: {len(result.usage_log)}; токенов всего: [bold]{total_tokens}[/bold].")
+    if result.stopped:
+        console.print("[yellow]Симуляция остановлена пользователем — решение неполное.[/yellow]")
     if result.legal_warning:
         console.print(f"[yellow]⚠ {result.legal_warning} — ссылки на нормы требуют проверки.[/yellow]")
     if result.recommendations is not None:

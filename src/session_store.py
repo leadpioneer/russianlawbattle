@@ -32,6 +32,7 @@ STATUS_READY = "ready"  # материалы загружены, можно за
 STATUS_RUNNING = "running"  # симуляция выполняется
 STATUS_DONE = "done"  # завершена успешно
 STATUS_ERROR = "error"  # завершена с ошибкой
+STATUS_STOPPED = "stopped"  # остановлена пользователем (частичный результат)
 
 
 @dataclass
@@ -48,6 +49,20 @@ class Session:
     report_md: str | None = None
     report_path: Path | None = None
     error: str | None = None
+    stop_event: threading.Event = field(default_factory=threading.Event)
+    pricing: dict = field(default_factory=dict)  # model -> ModelPricing (для оценки денег)
+    cost_summary: dict | None = None  # сводка токенов/денег после завершения
+
+    def request_stop(self) -> bool:
+        """Запросить кооперативную остановку; True — если симуляция была running."""
+        if self.status != STATUS_RUNNING:
+            return False
+        self.stop_event.set()
+        return True
+
+    def should_stop(self) -> bool:
+        """Колбэк для графа: пора ли останавливаться."""
+        return self.stop_event.is_set()
 
     def public_info(self) -> dict:
         """Данные сессии для API (без событий и тяжёлых объектов)."""
@@ -94,6 +109,34 @@ class SessionStore:
             return self._sessions.get(session_id)
 
 
+def build_cost_summary(
+    result: DebateResult, pricing: dict
+) -> dict:
+    """Сводка расхода токенов и денег по прогону (деньги — только если есть прайсы)."""
+    from .llm_client import EMPTY_USAGE, TokenUsage, estimate_cost
+
+    calls = []
+    totals = {"input_tokens": 0, "output_tokens": 0, "cached_tokens": 0, "reasoning_tokens": 0, "total_tokens": 0}
+    total_cost = 0.0
+    cost_available = bool(pricing)
+    for role, model, usage in result.usage_log:
+        usage = usage if isinstance(usage, TokenUsage) else EMPTY_USAGE
+        for key in totals:
+            totals[key] += getattr(usage, key)
+        cost = estimate_cost(model, usage, pricing)
+        if cost is None:
+            cost_available = False
+        else:
+            total_cost += cost
+        calls.append({"role": role, "model": model, "usage": usage.as_dict(), "cost_usd": cost})
+    return {
+        "calls": calls,
+        "totals": totals,
+        "total_cost_usd": round(total_cost, 6) if cost_available else None,
+        "cost_available": cost_available,
+    }
+
+
 def run_session_in_thread(session: Session) -> threading.Thread:
     """Запустить симуляцию сессии в фоновом потоке; события пишутся в session.events.
 
@@ -104,13 +147,20 @@ def run_session_in_thread(session: Session) -> threading.Thread:
     def _target() -> None:
         try:
             session.status = STATUS_RUNNING
+            session.stop_event.clear()
             logger.info("Сессия %s: старт симуляции.", session.id)
             result = run_debate(
                 cfg=session.config,
                 target_side=session.target_side,
                 sink=session.events.append,
+                should_stop=session.should_stop,
             )
             session.result = result
+            session.cost_summary = build_cost_summary(result, session.pricing)
+            if result.stopped:
+                session.status = STATUS_STOPPED
+                logger.info("Сессия %s: остановлена пользователем.", session.id)
+                return  # отчёт не генерируем — материалы можно править и перезапустить
             session.report_md = render_report(result)
             session.report_path = save_report(result)
             session.status = STATUS_DONE

@@ -35,7 +35,12 @@ from .agents.legal_context import VerifiedNorms, build_verified_norms
 from .legal_tools import LawExcerpt
 from .config import Config, load_config
 from .document_loader import CaseMaterials, load_case
-from .llm_client import reset_clients, set_config
+from .llm_client import (
+    get_usage_log,
+    reset_usage_log,
+    reset_clients,
+    set_config,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -116,6 +121,7 @@ class DebateState(TypedDict, total=False):
     recommendations: advisor.Recommendation | None  # блок рекомендаций (последний узел)
     norms_used: Annotated[list[LawExcerpt], operator.add]  # подтверждённые нормы за прогон
     legal_warnings: Annotated[list[str], operator.add]  # предупреждения о неподтверждённых нормах
+    stopped: bool  # пользователь нажал «Остановить» (частичный результат)
 
 
 @dataclass(frozen=True)
@@ -132,6 +138,8 @@ class DebateResult:
     recommendations: advisor.Recommendation | None = None  # блок рекомендаций (после вердикта)
     verified_norms: tuple[LawExcerpt, ...] = ()  # дедуплицированные нормы за весь прогон
     legal_warning: str | None = None  # предупреждение о неподтверждённых нормах (в отчёт)
+    stopped: bool = False  # симуляция остановлена пользователем до финала
+    usage_log: tuple[tuple[str, str, Any], ...] = ()  # (роль, модель, TokenUsage) за прогон
 
 
 def build_graph(
@@ -140,12 +148,14 @@ def build_graph(
     sink: EventSink | None = None,
     on_delta: OutputCallback | None = None,
     announce: SpeakerAnnouncer | None = None,
+    should_stop: Callable[[], bool] | None = None,
 ):
     """Собрать и скомпилировать граф прений; вывод замыкается в узлы.
 
     Вывод можно получать любым способом (или несколькими сразу): ``sink``
     получает :class:`DebateEvent`, legacy-колбэки ``on_delta``/``announce``
-    сохраняют прежнее поведение CLI.
+    сохраняют прежнее поведение CLI. ``should_stop`` — кооперативная остановка:
+    узлы проверяют флаг перед LLM-вызовами и завершают граф досрочно.
     """
 
     def emit(event: DebateEvent) -> None:
@@ -156,6 +166,10 @@ def build_graph(
             announce(event.speaker_title or SPEAKER_TITLES.get(event.role, ""), event.round or 0)
         if on_delta is not None and event.type == EVENT_DELTA:
             on_delta(event.text or "")
+
+    def stopped_now() -> bool:
+        """Проверка флага остановки (безопасно при should_stop=None)."""
+        return bool(should_stop is not None and should_stop())
 
     def init(_state: DebateState) -> dict:
         """Узел init: загрузка материалов дела, подготовка состояния."""
@@ -171,6 +185,8 @@ def build_graph(
 
     def claimant_turn(state: DebateState) -> dict:
         """Реплика юриста заявителя."""
+        if stopped_now():
+            return {"stopped": True}
         round_number = state["round_number"] + 1
         emit(
             DebateEvent(
@@ -204,6 +220,7 @@ def build_graph(
                 speaker_title=SPEAKER_TITLES[ROLE_CLAIMANT],
                 round=round_number,
                 text=statement.text,
+                payload={"usage": statement.text.usage.as_dict()},
             )
         )
         logger.info("Узел %s: реплика %d симв. (раунд %d).", NODE_CLAIMANT, len(statement.text), round_number)
@@ -216,6 +233,8 @@ def build_graph(
 
     def defendant_turn(state: DebateState) -> dict:
         """Реплика юриста ответчика."""
+        if stopped_now():
+            return {"stopped": True}
         round_number = state["round_number"]
         emit(
             DebateEvent(
@@ -249,6 +268,7 @@ def build_graph(
                 speaker_title=SPEAKER_TITLES[ROLE_DEFENDANT],
                 round=round_number,
                 text=statement.text,
+                payload={"usage": statement.text.usage.as_dict()},
             )
         )
         logger.info("Узел %s: реплика %d симв. (раунд %d).", NODE_DEFENDANT, len(statement.text), round_number)
@@ -260,6 +280,8 @@ def build_graph(
 
     def judge_review(state: DebateState) -> dict:
         """Оценка судьи по итогам раунда + решение о ходе процесса."""
+        if stopped_now():
+            return {"stopped": True}
         round_number = state["round_number"]
         emit(
             DebateEvent(
@@ -286,6 +308,7 @@ def build_graph(
                 speaker_title=SPEAKER_TITLES[ROLE_JUDGE],
                 round=round_number,
                 text=statement.text,
+                payload={"usage": statement.text.usage.as_dict()},
             )
         )
         emit(
@@ -306,7 +329,10 @@ def build_graph(
         return {"history": [statement], "judge_decision": decision}
 
     def should_continue(state: DebateState) -> str:
-        """Условный переход после судьи: новый раунд или итоговое решение."""
+        """Условный переход после судьи: новый раунд, итоговое решение или стоп."""
+        if state.get("stopped"):
+            logger.info("Переход: %s -> END (остановлено пользователем).", NODE_JUDGE)
+            return "__end__"
         decision = state.get("judge_decision")
         if decision is not None and not decision.continues:
             logger.info("Переход: %s -> %s (судья решил завершить).", NODE_JUDGE, NODE_VERDICT)
@@ -330,6 +356,8 @@ def build_graph(
 
     def final_verdict(state: DebateState) -> dict:
         """Итоговое мотивированное решение судьи."""
+        if stopped_now():
+            return {"stopped": True}
         round_number = state["round_number"]
         title = f"{SPEAKER_TITLES[ROLE_JUDGE]} — итоговое решение"
         emit(
@@ -363,6 +391,7 @@ def build_graph(
                 speaker_title=title,
                 round=round_number,
                 text=verdict,
+                payload={"usage": verdict.usage.as_dict()},
             )
         )
         emit(
@@ -370,7 +399,7 @@ def build_graph(
                 EVENT_VERDICT_DONE,
                 role=ROLE_JUDGE,
                 round=round_number,
-                payload={"length": len(verdict)},
+                payload={"length": len(verdict), "usage": verdict.usage.as_dict()},
             )
         )
         logger.info("Узел %s: решение готово (%d симв.).", NODE_VERDICT, len(verdict))
@@ -382,6 +411,8 @@ def build_graph(
 
     def recommendations_node(state: DebateState) -> dict:
         """Блок рекомендаций для стороны, выбранной пользователем (target_side)."""
+        if stopped_now():
+            return {"stopped": True}
         round_number = state["round_number"]
         emit(
             DebateEvent(
@@ -423,6 +454,7 @@ def build_graph(
                 speaker_title=advisor.ADVISOR_TITLE,
                 round=round_number,
                 text=rec.text,
+                payload={"usage": rec.text.usage.as_dict()},
             )
         )
         emit(
@@ -460,7 +492,7 @@ def build_graph(
     graph.add_conditional_edges(
         NODE_JUDGE,
         should_continue,
-        {NODE_CLAIMANT: NODE_CLAIMANT, NODE_VERDICT: NODE_VERDICT},
+        {NODE_CLAIMANT: NODE_CLAIMANT, NODE_VERDICT: NODE_VERDICT, END: END},
     )
     graph.add_edge(NODE_VERDICT, NODE_RECOMMENDATIONS)
     graph.add_edge(NODE_RECOMMENDATIONS, END)
@@ -513,6 +545,7 @@ def run_debate(
     sink: EventSink | None = None,
     on_delta: OutputCallback | None = None,
     announce: SpeakerAnnouncer | None = None,
+    should_stop: Callable[[], bool] | None = None,
     config_path: str | None = None,
 ) -> DebateResult:
     """Запустить симуляцию прений и вернуть итог (история + вердикт).
@@ -524,6 +557,7 @@ def run_debate(
     :param sink: подписчик на события :class:`DebateEvent` (консоль/WebSocket).
     :param on_delta: legacy-колбэк стриминга текста агентов (вывод в консоль).
     :param announce: legacy-колбэк объявления спикера (название роли, номер раунда).
+    :param should_stop: колбэк кооперативной остановки (проверяется между LLM-вызовами).
     :param config_path: путь к config.yaml (по умолчанию — config.yaml проекта).
     """
     effective = (
@@ -544,6 +578,7 @@ def run_debate(
     reset_clients()
     set_config(cfg)  # клиенты и суммаризатор должны использовать тот же конфиг
     clear_case_cache()
+    reset_usage_log()  # накопление расхода токенов только за этот прогон
     logger.info(
         "Старт симуляции: юрисдикция=%s; модели: заявитель=%s, ответчик=%s, судья=%s; max_rounds=%d.",
         cfg.jurisdiction,
@@ -553,28 +588,36 @@ def run_debate(
         cfg.max_rounds,
     )
 
-    graph = build_graph(cfg, sink=sink, on_delta=on_delta, announce=announce)
+    graph = build_graph(
+        cfg, sink=sink, on_delta=on_delta, announce=announce, should_stop=should_stop
+    )
     final: DebateState = graph.invoke({"target_side": target_side})
 
+    stopped = bool(final.get("stopped"))
     decision = final.get("judge_decision")
     result = DebateResult(
         cfg=cfg,
         materials=final["materials"],
         history=list(final.get("history", [])),
-        verdict=final["verdict"],
+        verdict=final.get("verdict", ""),
         rounds_played=final["round_number"],
-        finished_by_judge=bool(decision is not None and not decision.continues),
+        finished_by_judge=bool(decision is not None and not decision.continues and not stopped),
         target_side=target_side,
         recommendations=final.get("recommendations"),
         verified_norms=_dedupe_norms(final.get("norms_used", [])),
         legal_warning=_join_warnings(final.get("legal_warnings", [])),
+        stopped=stopped,
+        usage_log=tuple(get_usage_log()),
     )
     logger.info(
-        "Симуляция завершена: раундов=%d, завершена судьёй=%s, реплик=%d, вердикт=%d симв.",
+        "Симуляция завершена: раундов=%d, завершена судьёй=%s, остановлена=%s, реплик=%d, "
+        "вердикт=%d симв., вызовов LLM=%d.",
         result.rounds_played,
         result.finished_by_judge,
+        stopped,
         len(result.history),
         len(result.verdict),
+        len(result.usage_log),
     )
     if sink is not None:
         sink(
@@ -588,6 +631,11 @@ def run_debate(
                     "recommendations_prospects": (
                         result.recommendations.prospects if result.recommendations else None
                     ),
+                    "stopped": stopped,
+                    "usage_log": [
+                        {"role": role, "model": model, "usage": usage.as_dict()}
+                        for role, model, usage in result.usage_log
+                    ],
                 },
             )
         )
