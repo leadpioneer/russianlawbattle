@@ -152,6 +152,13 @@ export interface CostSummary {
   };
   total_cost_usd: number | null;
   cost_available: boolean;
+  /** Валюта прайсов роутера: routerai → RUB, остальные → USD. */
+  currency: "RUB" | "USD";
+}
+
+/** Символ валюты для отображения цены. */
+export function currencySymbol(currency: string | undefined): string {
+  return currency === "RUB" ? "₽" : "$";
 }
 
 export interface Recommendation {

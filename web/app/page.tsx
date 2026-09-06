@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { DebateEvent, DefaultsData, TargetSide } from "@/lib/api";
-import { API_BASE, checkHealth, connectSessionSocket, createSession, fetchDefaults, fetchEvidence, fetchReport, reportDownloadUrl, startRun, stopDebate, uploadCase } from "@/lib/api";
+import { API_BASE, checkHealth, connectSessionSocket, createSession, currencySymbol, fetchDefaults, fetchEvidence, fetchReport, reportDownloadUrl, startRun, stopDebate, uploadCase } from "@/lib/api";
 
 /** Ключ localStorage с настройками формы (восстанавливаются при следующем открытии). */
 const SETTINGS_KEY = "court-sim-settings-v1";
@@ -1059,7 +1059,7 @@ export default function Home() {
                 <span className="text-sm text-slate-600">
                   🪙 {report.cost_summary.totals.total_tokens.toLocaleString("ru-RU")} токенов
                   {report.cost_summary.cost_available && report.cost_summary.total_cost_usd !== null && (
-                    <> · 💰 ≈ ${report.cost_summary.total_cost_usd.toFixed(4)}</>
+                    <> · 💰 ≈ {currencySymbol(report.cost_summary.currency)}{report.cost_summary.total_cost_usd.toFixed(4)}</>
                   )}
                 </span>
               </div>
@@ -1086,7 +1086,7 @@ export default function Home() {
                         <td className="py-1.5 pr-3">{call.usage.cached_tokens}</td>
                         <td className="py-1.5 pr-3 font-medium">{call.usage.total_tokens}</td>
                         <td className="py-1.5">
-                          {call.cost_usd !== null ? `$${call.cost_usd.toFixed(5)}` : "—"}
+                          {call.cost_usd !== null && report.cost_summary ? `${currencySymbol(report.cost_summary.currency)}${call.cost_usd.toFixed(5)}` : "—"}
                         </td>
                       </tr>
                     ))}

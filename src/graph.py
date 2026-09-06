@@ -154,12 +154,15 @@ def _pack_to_excerpts(pack: EvidencePack | None) -> list[LawExcerpt]:
 
 
 def _pack_warnings(pack: EvidencePack | None, role: str, round_number: int) -> list[str]:
-    """Предупреждения Evidence Pack (degraded-режим) для состояния графа."""
+    """Предупреждения Evidence Pack (degraded-режим) для состояния графа.
+
+    Без префикса роли/раунда: текст одинаков для всех узлов, поэтому
+    ``_join_warnings`` дедуплицирует его в одно предупреждение в отчёте.
+    """
     if pack is None or pack.verified_sources:
         return []
     return [
-        f"{SPEAKER_TITLES.get(role, role)} (раунд {round_number}): подтверждённых "
-        "правовых источников нет; ссылки на нормы требуют ручной проверки"
+        "подтверждённых правовых источников нет; ссылки на нормы требуют ручной проверки"
     ]
 
 
@@ -666,6 +669,8 @@ def _run_evidence_pack(
     from .legal.evidence_pack import build_evidence_pack_async
     from .legal.service import LegalResearchService
 
+    service = LegalResearchService()  # одна точка: и healthcheck, и research
+
     async def _status_forwarder():
         statuses = await service.healthcheck_all()
         for status in statuses:
@@ -682,7 +687,6 @@ def _run_evidence_pack(
         return statuses
 
     async def _inner() -> tuple[EvidencePack, LegalIssues]:
-        service = LegalResearchService()
         await _status_forwarder()
         pack, issues, _result = await build_evidence_pack_async(
             materials.context or "",

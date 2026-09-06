@@ -109,10 +109,23 @@ class SessionStore:
             return self._sessions.get(session_id)
 
 
+def currency_for_base_url(base_url: str) -> str:
+    """Валюта прайсов роутера: routerai.ru — рубли, остальные — доллары США.
+
+    Роутеры отдают цены в своей валюте биллинга; ``pricing`` не несёт валюты,
+    поэтому определяем по хосту (известный случай пользователя — routerai.ru).
+    """
+    host = (base_url or "").lower()
+    return "RUB" if "routerai" in host else "USD"
+
+
 def build_cost_summary(
-    result: DebateResult, pricing: dict
+    result: DebateResult, pricing: dict, base_url: str = ""
 ) -> dict:
-    """Сводка расхода токенов и денег по прогону (деньги — только если есть прайсы)."""
+    """Сводка расхода токенов и денег по прогону (деньги — только если есть прайсы).
+
+    :param base_url: адрес роутера — определяет валюту (routerai → RUB).
+    """
     from .llm_client import EMPTY_USAGE, TokenUsage, estimate_cost
 
     calls = []
@@ -134,6 +147,7 @@ def build_cost_summary(
         "totals": totals,
         "total_cost_usd": round(total_cost, 6) if cost_available else None,
         "cost_available": cost_available,
+        "currency": currency_for_base_url(base_url),
     }
 
 
@@ -156,7 +170,9 @@ def run_session_in_thread(session: Session) -> threading.Thread:
                 should_stop=session.should_stop,
             )
             session.result = result
-            session.cost_summary = build_cost_summary(result, session.pricing)
+            session.cost_summary = build_cost_summary(
+                result, session.pricing, base_url=session.config.api_base_url
+            )
             if result.stopped:
                 session.status = STATUS_STOPPED
                 logger.info("Сессия %s: остановлена пользователем.", session.id)
