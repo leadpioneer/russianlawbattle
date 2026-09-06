@@ -137,6 +137,12 @@ def reset_usage_log() -> None:
     _usage_log.clear()
 
 
+def log_external_usage(role: str, model: str, usage: TokenUsage) -> None:
+    """Добавить потребление вне ролевых chat-вызовов (например, веб-поиск sonar)."""
+    if usage.total_tokens:
+        _usage_log.append((role, model, usage))
+
+
 def fetch_model_pricing(
     base_url: str,
     api_key: str,

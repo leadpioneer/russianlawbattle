@@ -44,6 +44,13 @@ _DATE_RE = re.compile(
 #: Номер постановления Пленума в заголовке: «№ 17».
 _PLENUM_NUMBER_RE = re.compile(r"№\s*(\d{1,3})")
 
+#: Новостные заголовки vsrf.ru (трансляции, пресс-релизы, встречи) —
+#: не судебные документы, в результаты практики не попадают.
+_NEWS_HINT_RE = re.compile(
+    r"трансляц|пресс-релиз|встреч|конференц|форум|визит|переговор|"
+    r"констатир|заседание совета|международн|мероприят"
+)
+
 
 def _parse_plenum_page(html: str) -> list[dict]:
     """Разобрать карточки <article> с .pdf; список словарей (для тестов тоже)."""
@@ -77,6 +84,11 @@ def _parse_plenum_page(html: str) -> list[dict]:
             doc_type = "plenum_decision"
         if "обзор" in lowered and "практик" in lowered:
             doc_type = "practice_review"
+
+        # vsrf.ru смешивает с Пленумом новостные карточки (трансляции,
+        # пресс-релизы о встречах и т.п.) — судебные документы не новости.
+        if _NEWS_HINT_RE.search(lowered):
+            continue
 
         documents.append(
             {
@@ -162,6 +174,10 @@ class SupremeCourtOfficialProvider:
             return []
 
         self._last_error = None
+        if not query.strip():
+            # Пустой запрос (широкий fallback evidence_pack) — релевантность
+            # проверить нечем, тащить всё подряд нельзя: честный пустой ответ.
+            return []
         scored = sorted(
             ((_relevance(doc["title"], query), doc) for doc in documents),
             key=lambda pair: pair[0],
@@ -169,7 +185,7 @@ class SupremeCourtOfficialProvider:
         )
         sources: list[LegalSource] = []
         for score, doc in scored[:limit]:
-            if score <= 0 and query.strip():
+            if score <= 0:
                 continue  # без совпадений — не тащим всё подряд
             doc_type_map = {
                 "plenum_decision": "supreme_court",

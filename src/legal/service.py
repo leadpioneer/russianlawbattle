@@ -19,6 +19,7 @@ from .models import EvidencePack, LegalSource, ProviderHealth, now_iso
 from .providers.base import LegalProvider
 from .providers.mock import MockLegalProvider
 from .providers.pravo_gov import PravoGovProvider
+from .providers.sonar import SonarWebSearchProvider
 from .supreme_court import SupremeCourtOfficialProvider
 from .case_law import (
     CaseLawCoverage,
@@ -61,6 +62,7 @@ _PROVIDER_REGISTRY: dict[str, type] = {
     "mock": MockLegalProvider,
     "supreme_court_official": SupremeCourtOfficialProvider,
     "case_law_unavailable": UnavailableCaseLawProvider,
+    "sonar_web_search": SonarWebSearchProvider,
 }
 
 
@@ -84,6 +86,11 @@ def default_provider_configs() -> list[ProviderConfig]:
     return [
         ProviderConfig(name="pravo_gov", enabled=True, priority=100, timeout_seconds=25.0),
         ProviderConfig(name="supreme_court_official", enabled=True, priority=90, timeout_seconds=25.0),
+        # Веб-поиск через sonar (роутер): дополняет официальные API практикой
+        # нижестоящих судов. Результаты — partially_verified (сверка вручную).
+        ProviderConfig(
+            name="sonar_web_search", enabled=True, priority=80, timeout_seconds=90.0
+        ),
     ]
 
 
