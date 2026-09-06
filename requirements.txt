@@ -22,5 +22,7 @@ python-multipart>=0.0.12
 
 # MCP: актуальные нормы права через pravo.gov.ru (этап 2, шаг 4)
 mcp>=1.2.0
-# pravo-mcp не опубликован на PyPI — ставим из исходников (subdirectory-пакет репозитория)
-pravo-mcp @ git+https://github.com/AlsKozlov/ru-legal.git#subdirectory=mcps/pravo
+# pravo-mcp не опубликован на PyPI; wheel собран из исходников
+# (github.com/AlsKozlov/ru-legal, mcps/pravo) и положен в wheels/ для offline-установки.
+# Обновить wheel: pip wheel "git+https://github.com/AlsKozlov/ru-legal.git#subdirectory=mcps/pravo" -w wheels --no-deps
+./wheels/pravo_mcp-0.1.0-py3-none-any.whl
