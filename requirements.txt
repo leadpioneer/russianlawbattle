@@ -27,6 +27,11 @@ mcp>=1.2.0
 # Обновить wheel: pip wheel "git+https://github.com/AlsKozlov/ru-legal.git#subdirectory=mcps/pravo" -w wheels --no-deps
 ./wheels/pravo_mcp-0.1.0-py3-none-any.whl
 
+# Правовой research layer (этап 3): HTTP к pravo.gov.ru и КонсультантПлюс,
+# markitdown — HTML/PDF→Markdown для получения текстов статей НПА
+httpx>=0.27.0
+markitdown[pdf]>=0.1.0
+
 # Тесты (этап 3): unit/integration-тесты новой бизнес-логики
 pytest>=8.0.0
 pytest-asyncio>=0.24.0
