@@ -10,7 +10,10 @@ from __future__ import annotations
 
 import json
 from dataclasses import asdict, dataclass, field
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
+
+if TYPE_CHECKING:
+    from .case_law import CaseLawCoverage
 
 SourceType = Literal[
     "statute",
@@ -50,12 +53,12 @@ class LegalSource:
     court: str | None = None
     verified: bool = False
     verification_status: VerificationStatus = "unverified"
-    provider: str = "manual"  # pravo_gov, pravo_mcp, ru_legal_mcp, manual, user_document
+    provider: str = "manual"  # pravo_gov, pravo_mcp, manual, user_document, supreme_court_official
     retrieved_at: str = ""
     relevance_score: float = 0.0
     supports_issues: list[str] = field(default_factory=list)
     warning: str | None = None
-    #: уровень авторитетности практики (шаг 8): A (КС/Пленум/обзор ВС), B, C, D
+    #: уровень авторитетности: A (КС/Пленум/обзор ВС), B, C, D, USER (загружен пользователем)
     authority_level: str | None = None
 
     def __post_init__(self) -> None:
@@ -105,6 +108,8 @@ class EvidencePack:
     sources: list[LegalSource] = field(default_factory=list)
     provider_statuses: list[ProviderHealth] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    #: честное покрытие поиска практики (шаг 8); None — старые pack'и
+    case_law_coverage: "CaseLawCoverage | None" = None
 
     # -- агрегаты ------------------------------------------------------------
 
@@ -137,6 +142,9 @@ class EvidencePack:
             "sources": [s.to_dict() for s in self.sources],
             "provider_statuses": [p.to_dict() for p in self.provider_statuses],
             "warnings": list(self.warnings),
+            "case_law_coverage": (
+                self.case_law_coverage.to_dict() if self.case_law_coverage else None
+            ),
         }
 
     def to_json(self, indent: int = 2) -> str:
@@ -144,6 +152,9 @@ class EvidencePack:
 
     @classmethod
     def from_dict(cls, data: dict) -> "EvidencePack":
+        from .case_law import CaseLawCoverage
+
+        coverage_data = data.get("case_law_coverage")
         return cls(
             case_id=data["case_id"],
             jurisdiction=data["jurisdiction"],
@@ -152,6 +163,16 @@ class EvidencePack:
             sources=[LegalSource.from_dict(s) for s in data.get("sources", [])],
             provider_statuses=[ProviderHealth(**p) for p in data.get("provider_statuses", [])],
             warnings=list(data.get("warnings", [])),
+            case_law_coverage=(
+                CaseLawCoverage(
+                    searched_sources=list(coverage_data.get("searched_sources", [])),
+                    not_searched_sources=list(coverage_data.get("not_searched_sources", [])),
+                    coverage=coverage_data.get("coverage", "unavailable"),
+                    warning=coverage_data.get("warning"),
+                )
+                if isinstance(coverage_data, dict)
+                else None
+            ),
         )
 
 

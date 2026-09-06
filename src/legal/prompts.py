@@ -62,11 +62,14 @@ def format_evidence_block(pack: EvidencePack) -> str:
 
     partial: list[LegalSource] = []
     unverified: list[LegalSource] = []
+    case_law: list[LegalSource] = []
     for source in pack.sources:
-        if source.verification_status == "verified":
+        if source.verification_status == "verified" and source.source_type == "statute":
             lines.append(f"  {_format_source(source)}")
             if source.excerpt:
                 lines.append(f"      Текст: {_format_excerpt(source)}")
+        elif source.source_type in ("case_law", "supreme_court", "official_explanation"):
+            case_law.append(source)
         elif source.verification_status == "partially_verified":
             partial.append(source)
         else:
@@ -77,6 +80,26 @@ def format_evidence_block(pack: EvidencePack) -> str:
         lines.append("ЧАСТИЧНО ПРОВЕРЕННЫЕ ИСТОЧНИКИ (упоминать только с оговоркой):")
         lines.extend(f"  {_format_source(s)}" for s in partial)
 
+    if case_law:
+        lines.append("")
+        lines.append(
+            "СУДЕБНАЯ ПРАКТИКА И РАЗЪЯСНЕНИЯ (это НЕ нормы права; формулировать "
+            "вероятностно: «имеется сходная практика», «может поддерживать аргумент», "
+            "«требуется проверить фактическое сходство»):"
+        )
+        for source in case_law:
+            level = source.authority_level or "USER"
+            line = f"  [{source.id}] ({level}) {source.citation} — {source.authority}"
+            if source.case_number:
+                line += f", дело/акт {source.case_number}"
+            if source.decision_date:
+                line += f", от {source.decision_date}"
+            if source.official_url:
+                line += f" — {source.official_url}"
+            lines.append(line)
+            if source.excerpt and source.verification_status == "verified":
+                lines.append(f"      Выдержка: {_format_excerpt(source, 600)}")
+
     if unverified:
         lines.append("")
         lines.append("НЕПРОВЕРЕННЫЕ ИСТОЧНИКИ (не использовать как точную правовую ссылку):")
@@ -84,6 +107,12 @@ def format_evidence_block(pack: EvidencePack) -> str:
 
     lines.append("")
     lines.append(_RULES_VERIFIED)
+
+    # Честное покрытие практики (шаг 8).
+    coverage = pack.case_law_coverage
+    if coverage is not None:
+        lines.append("")
+        lines.append(f"ПОКРЫТИЕ ПОИСКА ПРАКТИКИ: {coverage.user_facing_message()}")
     return "\n".join(lines)
 
 

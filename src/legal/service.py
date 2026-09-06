@@ -19,6 +19,13 @@ from .models import EvidencePack, LegalSource, ProviderHealth, now_iso
 from .providers.base import LegalProvider
 from .providers.mock import MockLegalProvider
 from .providers.pravo_gov import PravoGovProvider
+from .supreme_court import SupremeCourtOfficialProvider
+from .case_law import (
+    CaseLawCoverage,
+    MASS_SOURCES_UNAVAILABLE,
+    UnavailableCaseLawProvider,
+    user_acts_from_materials,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +47,7 @@ class ResearchResult:
     pack: EvidencePack
     provider_statuses: list[ProviderHealth] = field(default_factory=list)
     duration_s: float = 0.0
+    case_law_coverage: CaseLawCoverage | None = None
 
     @property
     def degraded(self) -> bool:
@@ -51,6 +59,8 @@ class ResearchResult:
 _PROVIDER_REGISTRY: dict[str, type] = {
     "pravo_gov": PravoGovProvider,
     "mock": MockLegalProvider,
+    "supreme_court_official": SupremeCourtOfficialProvider,
+    "case_law_unavailable": UnavailableCaseLawProvider,
 }
 
 
@@ -73,6 +83,7 @@ def default_provider_configs() -> list[ProviderConfig]:
     """Дефолтная конфигурация (пока секция legal_research не введена в шаге 6)."""
     return [
         ProviderConfig(name="pravo_gov", enabled=True, priority=100, timeout_seconds=25.0),
+        ProviderConfig(name="supreme_court_official", enabled=True, priority=90, timeout_seconds=25.0),
     ]
 
 
@@ -110,8 +121,20 @@ class LegalResearchService:
 
     # -- research -----------------------------------------------------------
 
-    async def research(self, queries: list[str], jurisdiction: str, case_id: str = "case") -> ResearchResult:
-        """Собрать Evidence Pack по списку запросов. Не бросает исключений."""
+    async def research(
+        self,
+        queries: list[str],
+        jurisdiction: str,
+        case_id: str = "case",
+        *,
+        materials=None,
+    ) -> ResearchResult:
+        """Собрать Evidence Pack по списку запросов. Не бросает исключений.
+
+        :param materials: CaseMaterials — если задан, судебные акты из
+            загруженных пользователем документов попадают в pack как
+            ``case_law``/``user_document`` с уровнем ``USER``.
+        """
         started = time.monotonic()
         statuses = await self.healthcheck_all()
         status_by_name = {s.provider: s for s in statuses}
@@ -119,6 +142,11 @@ class LegalResearchService:
         all_statutes: list[LegalSource] = []
         all_case_law: list[LegalSource] = []
         warnings: list[str] = []
+
+        # Практика из загруженных пользователем документов (шаг 8, п.2).
+        user_acts: list[LegalSource] = []
+        if materials is not None and getattr(materials, "fragments", None):
+            user_acts = user_acts_from_materials(materials.fragments)
 
         for cfg, provider in self.providers:
             healthy = status_by_name.get(provider.name)
@@ -155,19 +183,54 @@ class LegalResearchService:
         self._renumber(statutes, prefix="LAW")
         self._renumber(case_law, prefix="CASE")
 
+        # Честное покрытие практики (шаг 8, п.4).
+        searched = [
+            provider.name
+            for _, provider in self.providers
+            if "case_law" in next(
+                (
+                    s.capabilities for s in statuses if s.provider == provider.name
+                ),
+                [],
+            )
+            and next((s for s in statuses if s.provider == provider.name), None)
+            and next((s for s in statuses if s.provider == provider.name)).status
+            in ("healthy", "degraded")
+        ]
+        not_searched = [
+            status.provider
+            for status in statuses
+            if status.provider not in searched
+        ]
+        coverage = CaseLawCoverage(
+            searched_sources=searched,
+            not_searched_sources=not_searched,
+            coverage="official_only" if searched else "unavailable",
+            warning=None if searched else MASS_SOURCES_UNAVAILABLE,
+        )
+        if not case_law and not user_acts:
+            coverage.warning = coverage.user_facing_message()
+        elif not case_law:
+            coverage.warning = (
+                "по подключённым источникам практика не найдена; "
+                + coverage.user_facing_message()
+            )
+
         pack = EvidencePack(
             case_id=case_id,
             jurisdiction=jurisdiction,
             generated_at=now_iso(),
             legal_issues=list(queries),
-            sources=[*statutes, *case_law],
+            sources=[*statutes, *case_law, *user_acts],
             provider_statuses=statuses,
             warnings=self._dedupe_strings(warnings),
         )
+        pack.case_law_coverage = coverage
         return ResearchResult(
             pack=pack,
             provider_statuses=statuses,
             duration_s=round(time.monotonic() - started, 2),
+            case_law_coverage=coverage,
         )
 
     # -- helpers -----------------------------------------------------------

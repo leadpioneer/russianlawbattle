@@ -29,6 +29,7 @@ async def build_evidence_pack_async(
     free_text_query: str | None = None,
     use_llm: bool = True,
     service: LegalResearchService | None = None,
+    materials=None,
 ) -> tuple[EvidencePack, LegalIssues, ResearchResult]:
     """Async-сборка Evidence Pack (вызывать из async-контекста или обёртки ниже)."""
     service = service or LegalResearchService()
@@ -44,7 +45,9 @@ async def build_evidence_pack_async(
     if not queries:
         queries = [materials_summary[:200] or context[:200] or jurisdiction]
 
-    result = await service.research(queries, jurisdiction, case_id=case_id)
+    result = await service.research(
+        queries, jurisdiction, case_id=case_id, materials=materials
+    )
 
     pack = result.pack
     pack.legal_issues = list(queries)
@@ -80,6 +83,7 @@ def build_evidence_pack(
     free_text_query: str | None = None,
     use_llm: bool = True,
     service: LegalResearchService | None = None,
+    materials=None,
 ) -> tuple[EvidencePack, LegalIssues, ResearchResult]:
     """Синхронная обёртка для графа/CLI (отдельный поток, без event loop)."""
     import asyncio
@@ -102,6 +106,7 @@ def build_evidence_pack(
             free_text_query=free_text_query,
             use_llm=use_llm,
             service=service,
+            materials=materials,
         )
     )
 
