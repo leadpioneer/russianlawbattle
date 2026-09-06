@@ -52,12 +52,25 @@ cd web; npm run dev                                                             
 | `src/document_loader.py` | case_context + case_files, суммаризация | `/api/upload` без контекста; CLI-прогон |
 | `src/agents/base.py` | роли, `Statement`, юрисдикция, блок дела | все агенты |
 | `src/agents/*.py` | промпты и генерация реплик | живой прогон (тон текста/маркер судьи) |
-| `src/agents/legal_context.py` | формулирование запросов норм | прения: блок «ПРОВЕРЕННЫЕ НОРМЫ», деградация |
-| `src/graph.py` | LangGraph, события, остановка, `DebateResult` | e2e WebSocket; CLI; отчёт |
-| `src/legal_tools.py` | MCP-клиент pravo.gov.ru, ранжирование | `_test_legal`-проба; предупреждение деградации |
+| `src/agents/legal_context.py` | legacy-формирование запросов норм (фасад) | deprecated — не расширяется |
+| `src/graph.py` | LangGraph, узел `build_evidence_pack`, linter, события, `DebateResult` | e2e WebSocket; CLI; отчёт |
+| `src/legal_tools.py` | DEPRECATED-фасад pravo-mcp | не расширяется; снос после шага 6+ |
 | `src/session_store.py` | сессии, статусы, stop, cost_summary | `/api/run`, `/api/stop`, перезапуск stopped |
-| `src/api.py` | REST/WS, CORS, валидация | e2e-скрипт; `npm run build` (типы) |
-| `src/report.py` | md-отчёт | полный прогон, открыть `output/verdict_*.md` |
+| `src/api.py` | REST/WS, CORS, валидация, evidence/health/diagnostics | e2e-скрипт; `npm run build` (типы) |
+| `src/report.py` | md-отчёт (+ разделы этапа 3, дисклеймер) | полный прогон, открыть `output/verdict_*.md` |
+| `src/legal/models.py` | `LegalSource`/`EvidencePack`/`ProviderHealth`, инварианты верификации | unit-тесты; JSON-roundtrip |
+| `src/legal/service.py` | оркестрация провайдеров, дедуп, ranking, coverage | research на mock-провайдерах |
+| `src/legal/providers/pravo_gov.py` | реквизиты актов (официальный API) | живой прогон «статья N <акт>» |
+| `src/legal/providers/supreme_court.py` | Пленум/обзоры ВС (vsrf.ru, уровень A) | живой healthcheck vsrf.ru |
+| `src/legal/providers/mock.py` | тестовые фикстуры (без сети) | unit-тесты сервиса |
+| `src/legal/case_law.py` | user-акты (USER), coverage, disabled-расширения | классификация документов дела |
+| `src/legal/converters.py` | тексты статей (Консультант + markitdown) | живой прогон «статья 309 ГК РФ» |
+| `src/legal/citation_verifier.py` | linter ссылок + repair-pass | тесты верификатора; отчёт |
+| `src/legal/issue_extractor.py` | вопросы дела (LLM + fallback) | прогон с LLM; fallback без |
+| `src/legal/evidence_pack.py` | сборка pack + persist в сессию | `/api/session/{id}/evidence` |
+| `src/legal/prompts.py` | prompt-блок Evidence Pack | живой прогон (секции/rules) |
+| `src/legal/diagnostics.py` | диагностика pravo-mcp | `python -m src.legal_diagnostics` |
+| `src/legal_diagnostics.py` | CLI диагностики | `--json`, `--provider mock` |
 | `src/main.py` | CLI (debug) | `run --max-rounds 1`, `config` |
 | `web/lib/api.ts` | REST/WS-клиент, TS-типы отчёта | типы ↔ JSON API; `npm run build` |
 | `web/app/page.tsx` | весь UI-мастер | браузер: все 4 экрана |

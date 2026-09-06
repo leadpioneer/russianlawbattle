@@ -19,24 +19,40 @@
 │  src/session_store.py                                       │
 │    SessionStore (in-memory) + Session (статусы, события,    │
 │    stop_event, pricing, cost_summary)                       │
-│    sessions/<id>/{case_context.md, case_files/, output/}    │
+│    sessions/<id>/{case_context.md, case_files/, output/,    │
+│                  evidence_pack.json}                        │
 └──────────────┬──────────────────────────────────────────────┘
                │ run_debate(cfg=…, target_side=…, sink=…, should_stop=…)
 ┌──────────────▼──────────────────────────────────────────────┐
 │  src/graph.py  LangGraph StateMachine                       │
-│    init → claimant_turn → defendant_turn → judge_review     │
+│    init → build_evidence_pack → claimant_turn               │
+│           → defendant_turn → judge_review                   │
 │    judge_review ─?(ПРОДОЛЖАТЬ и round < max)→ claimant_turn │
 │    judge_review ─?(иначе)─────────────────→ final_verdict   │
-│    final_verdict ─────────────────────────→ recommendations │
+│    final_verdict ─(linter)────────────────→ recommendations │
+│    recommendations ─(linter)──────────────→ END             │
 │    любой узел ─?(should_stop)─────────────→ END (stopped)   │
-└───────┬──────────────────────────────────┬──────────────────┘
-        │ chat(role, …)                    │ search_law(query)
-┌───────▼────────────────┐   ┌─────────────▼──────────────────┐
-│ src/llm_client.py      │   │ src/legal_tools.py             │
-│ openai SDK (streaming) │   │ MCP-клиент (stdio-подпроцесс   │
-│ usage из стрима        │   │ pravo_mcp.server) →            │
-│ прайсы из GET /models  │   │ publication.pravo.gov.ru/api   │
-└───────┬────────────────┘   └────────────────────────────────┘
+└───────┬──────────────────────────────┬──────────────────────┘
+        │ chat(role, …)                │ LegalResearchService
+┌───────▼────────────────┐   ┌─────────▼──────────────────────────────────┐
+│ src/llm_client.py      │   │ src/legal/  (правовой research layer,      │
+│ openai SDK (streaming) │   │   этап 3)                                  │
+│ usage из стрима        │   │  service.py — оркестрация провайдеров      │
+│ прайсы из GET /models  │   │  providers/pravo_gov.py — реквизиты актов  │
+│ citation_verifier.py   │   │  providers/supreme_court.py — Пленум ВС    │
+│ (linter ссылок)        │   │  converters.py — тексты статей (markitdown)│
+└───────┬────────────────┘   │  case_law.py — user-акты, coverage         │
+        │                    │  evidence_pack.py, prompts.py, models.py   │
+        │                    └───────┬────────────────────┬───────────────┘
+        │                            │ HTTP               │ HTTP
+        │                    ┌───────▼────────┐   ┌───────▼─────────────┐
+        │                    │ publication.   │   │ www.vsrf.ru         │
+        │                    │ pravo.gov.ru   │   │ (Пленум, обзоры)    │
+        │                    └───────┬────────┘   └─────────────────────┘
+        │                            │ (тексты статей — markitdown)
+        │                    ┌───────▼────────┐
+        │                    │ КонсультантПлюс│  (неофициальный текст, помечается)
+        │                    └────────────────┘
         ▼
   [OI]-совместимый роутер (routerai.ru / OpenRouter / vLLM / …)
 ```
@@ -49,15 +65,23 @@
 ## Граф прений (LangGraph)
 
 Узлы объявлены в `build_graph()`; состояние — `DebateState` (TypedDict; для `history`,
-`norms_used`, `legal_warnings` редьюсер `operator.add` — узлы возвращают частичные
-обновления, LangGraph их складывает).
+`norms_used`, `legal_warnings`, `citation_results` редьюсер `operator.add` — узлы
+возвращают частичные обновления, LangGraph их складывает).
 
 | Узел | Делает | Возвращает |
 |---|---|---|
 | `init` | Загружает материалы дела (кэш по `project_root`) | `cfg, materials, round_number=0` |
-| `claimant_turn` | Реплика юриста заявителя (+нормы) | `history+, round_number, norms_used+, legal_warnings+` |
-| `defendant_turn` | Реплика юриста ответчика (+нормы) | `history+, norms_used+, legal_warnings+` |
+| `build_evidence_pack` | **Этап 3**: вопросы дела → провайдеры → Evidence Pack + событие | `legal_issues, evidence_pack, evidence_block` |
+| `claimant_turn` | Реплика юриста заявителя (с общим Evidence Pack) | `history+, round_number, norms_used+, legal_warnings+` |
+| `defendant_turn` | Реплика юриста ответчика (с общим Evidence Pack) | `history+, norms_used+, legal_warnings+` |
 | `judge_review` | Оценка раунда + маркер решения | `history+, judge_decision` |
+| `final_verdict` | Итоговое решение + linter ссылок | `verdict, norms_used+, citation_results+` |
+| `recommendations` | Рекомендации для target_side + linter | `recommendations, citation_results+` |
+
+Evidence Pack собирается **один раз до прений** и передаётся всем трём ролям
+(каждая интерпретирует его в интересах своей стороны). До этапа 3 каждый узел
+сам формулировал запросы норм через MCP (4 лишних LLM-вызова за прогон) —
+это заменено единым узлом `build_evidence_pack`.
 | `final_verdict` | Итоговое мотивированное решение | `verdict, norms_used+, legal_warnings+` |
 | `recommendations` | Блок рекомендаций для `target_side` | `recommendations, norms_used+, legal_warnings+` |
 
@@ -98,10 +122,16 @@ continues, addressee, payload`; `as_dict()` отдаёт словарь без `
 | `recommendations_done` | Рекомендации готовы | payload: target_side, prospects | служебное |
 | `debate_done` | Граф дошёл до конца | payload: rounds_played, finished_by_judge, statements, verdict_length, recommendations_prospects, **stopped**, **usage_log[]** | WS: close; CLI: итог |
 | `error` | Исключение в потоке сессии | payload: message | WS: красная плашка |
+| `legal_research_started` | Узел `build_evidence_pack` начал работу | — | WS: индикатор «ищем право» |
+| `provider_status` | Healthcheck провайдера | payload: provider, status, message | WS: статус источников |
+| `legal_source_found` | Найден источник | payload: source_id, verification_status, citation, source_type | WS: счётчик найденного |
+| `evidence_pack_ready` | Pack собран | payload: verified_count, partial_count, warning_count, total_sources | WS: сводка перед прениями |
 
-Порядок для полного прогона `max_rounds=1`: `agent_start(claimant) → delta×N →
-agent_end(claimant) → …(defendant)… → judge_decision → …(вердикт)… → verdict_done →
-…(аналитик)… → recommendations_done → debate_done`.
+Порядок для полного прогона `max_rounds=1`: `legal_research_started →
+provider_status×N → legal_source_found×N → evidence_pack_ready →
+agent_start(claimant) → delta×N → agent_end(claimant) → …(defendant)… →
+judge_decision → …(вердикт)… → verdict_done → …(аналитик)… →
+recommendations_done → debate_done`.
 
 ## Жизненный цикл сессии
 
@@ -146,32 +176,106 @@ created ──upload──▶ ready ──run──▶ running ──┬─ ус
 Qwen, DeepSeek, Grok, Kimi, GPT-6 Astra) резолвятся строго. Если прайсов нет
 (`cost_available=false`) — показываются только токены, это не ошибка.
 
-## MCP-интеграция (нормы права)
+## Правовой research layer (этап 3)
 
-`src/legal_tools.py` поднимает `pravo_mcp.server` (пакет из локального wheel) как
-**stdio-подпроцесс** и ходит в него через SDK `mcp`: `search_npa(query, limit)` →
-ранжирование → (для топ-1) `get_npa(eid)`.
+Пакет `src/legal/` — сменяемый слой провайдеров с честной моделью верификации.
+Ключевое правило: **LLM не выдаёт юридическую ссылку как подтверждённую, если она
+не пришла из проверяемого источника и не присутствует в Evidence Pack.**
 
-Перед каждой репликой `agents/legal_context.build_verified_norms()`: модель роли коротким
-вызовом формулирует 1–2 запроса-**названия/номера** актов → `search_law()` → найденные
-реквизиты собираются в блок «ПРОВЕРЕННЫЕ НОРМЫ ПРАВА» с правилами (ссылаться только на
-них/материалы; тексты статей не загружены — без цитирования; чужие нормы —
-«(требует проверки)»).
+### Доменные модели (`models.py`)
 
-Ранжирование шума (поиск портала — подстрочный по `name`): +4 точный номер акта
-(`152-ФЗ`), +3 вхождение запроса, +2 «Федерального закона / Закона РФ», −2 региональные/
-«внесении изменений». Параметр `doc_type` **не передаётся** — API портала отклоняет его
-(HTTP 400).
+`LegalSource` (ID `LAW-001`/`CASE-001`/`DOC-001`, source_type, citation, excerpt,
+verification_status, provider, authority_level), `ProviderHealth`, `EvidencePack`
+(с `CaseLawCoverage`). Инвариант в `__post_init__`: `verified=True` допустим только
+при `verification_status='verified'` И непустом `excerpt` — типы не позволяют выдать
+непроверенный источник за подтверждённый.
 
-Деградация многоуровневая и никогда не роняет симуляцию: `legal_mcp.enabled=false` →
-тихо без норм; не-РФ юрисдикция → без норм; MCP недоступен/пусто → `degraded=True` →
-предупреждение «нормы права не подтверждены внешним источником» в md-отчёт, JSON и CLI.
+Статусы: `verified` (реквизиты + точная выдержка), `partially_verified` (реквизиты
+подтверждены, текст неофициальный/недоступен), `unverified`, `unavailable`,
+`contradicted`. Уровни авторитетности практики: A (КС/Пленум ВС/обзор ВС),
+B (ВС/кассация), C (апелляция), D (первая инстанция), USER (загружен пользователем).
 
-Известные ограничения `pravo-mcp` (их MCP-STATUS + наша проверка): TLS портала сломан
-upstream (сервер ходит по http://), `get_npa` стабильно 404 — **тексты статей недоступны**,
-подтверждаются только реквизиты (номер/дата/ссылка на официальную публикацию); в реестре
-публикации с ~2011 — консолидированных текстов старых кодексов нет; только федеральные
-НПА. Кэш сервера 10 мин, максимум 5 параллельных запросов.
+### Провайдеры (`providers/`)
+
+Контракт `LegalProvider` (Protocol, runtime_checkable): `healthcheck`,
+`search_statutes`, `get_document`, `search_case_law`. Невозможность поиска — это
+статус/пустой список, **никогда** не выдуманные данные.
+
+- **`pravo_gov.py`** — официальный API публикации: `GET /api/Documents?name=…`
+  (подстрочный поиск по названию; PageSize кратен 10; фолбэк-развёртывание
+  аббревиатур «ГК РФ» → «Гражданский кодекс») → реквизиты + `eoNumber` → страница
+  `pravo.gov.ru/document/<eoNumber>` → официальный PDF. Нормализация всегда
+  `partially_verified`: текст статьи портал отдаёт только **сканом** (PDF без
+  текстового слоя, CCITTFaxDecode — pypdf/markitdown извлекают 0 символов).
+- **`supreme_court.py`** — `vsrf.ru/plenum.php`: карточки `<article>` с заголовками,
+  датами и PDF (`/upload/iblock/…`). Пленум/обзоры → уровень A, `verified`
+  (публикация на официальном домене подтверждает реквизиты). Полнотекстового
+  поиска по базе актов ВС нет — только раздел Пленума.
+- **`mock.py`** — детерминированные фикстуры (помечены «фикстура») для тестов и
+  offline-прогонов.
+- **`case_law.py`** — `UnavailableCaseLawProvider` (честная заглушка массовых
+  источников: sudact.ru требует JavaScript, kad.arbitr — капча) + классификация
+  загруженных пользователем актов (`classify_user_document`, метаданные суда/даты/
+  номера/норм, уровень USER) + `CaseLawCoverage`. Disabled-расширения
+  `AtomnoCaseLawProvider`/`KadArbitrProvider` — только интерфейсы
+  (NotImplementedError), healthcheck `not_configured`.
+
+### Тексты статей (`converters.py`)
+
+Цепочка: найти базовый документ на КонсультантПлюс → в оглавлении
+(`cons_doc_LAW_<id>/<hash>/`) ссылку на статью → **markitdown** (Microsoft, MIT):
+HTML → Markdown → очистка навигации. Текст честно помечается: `excerpt` заполняется,
+статус остаётся `partially_verified` (источник неофициальный).
+
+### Сервис (`service.py`)
+
+`LegalResearchService.research()`: параллельный healthcheck → поиск в порядке
+priority с таймаутом на каждого провайдера → нормы/практика раздельно →
+дедупликация (лучший экземпляр: verified → pravo_gov → релевантность) →
+пере-нумерация → `CaseLawCoverage`. Падение провайдера = warning в pack,
+**никогда не исключение**.
+
+### Сборка и persist (`evidence_pack.py`)
+
+`build_evidence_pack_async` (issue_extractor → research) / sync-обёртка для узла
+графа; pack сохраняется в `sessions/<id>/evidence_pack.json`
+(`save/load_evidence_pack`) — для `/api/session/{id}/evidence` и отчётов.
+
+### Citation verifier (`citation_verifier.py`)
+
+Детект ссылок 4 каналами: `[LAW-001]`, `ст. N <Акт РФ>`, `266-ФЗ`,
+`дело № А40-…/2026` → сверка с карточками pack →
+`verified/missing/mismatch/unverified_source` → `passed/warning/failed`. Вердикт
+и рекомендации проходят linter в графе; при проблемах — один repair-pass (LLM
+убирает непроверенные номера, не выдумывая замену; при сбое LLM текст не
+меняется — ошибки остаются видимыми в отчёте).
+
+### Экстрактор вопросов (`issue_extractor.py`)
+
+Один LLM-вызов → строгий JSON (тип спора, процедура, требования, возражения,
+вопросы, факты к доказыванию). Fallback: свободный текст пользователя
+(`source: user`) или разбивка на предложения (`fallback`). Результат — только
+поисковые подсказки, не доказательства.
+
+### Prompt-блок (`prompts.py`)
+
+Секции «ПРОВЕРЕННЫЕ / ЧАСТИЧНО ПРОВЕРЕННЫЕ / НЕПРОВЕРЕННЫЕ / СУДЕБНАЯ ПРАКТИКА»
++ 6 правил цитирования (номера не выдумывать; практику не называть нормой права —
+только «имеется сходная практика») + строка покрытия поиска практики.
+
+## MCP-интеграция (pravo-mcp, legacy-фасад)
+
+`src/legal_tools.py` (DEPRECATED-фасад, сносится после переноса всех потребителей)
+поднимает `pravo_mcp.server` (локальный wheel) как stdio-подпроцесс через SDK `mcp`.
+Диагностика цепочки — `python -m src.legal_diagnostics` (или
+`POST /api/legal/diagnostics`).
+
+Живой диагноз (06.09.2026): пакет/transport/session/tools — ok; `search_npa`
+работает (но запросы вида «статья 309 ГК РФ» дают 0 хитов — портал ищет подстроку
+по названию акта; лечится разворотом аббревиатуры); `get_npa` возвращает строку
+«Документ не найден на pravo.gov.ru» — **тексты статей через MCP недоступны**,
+поэтому основной источник реквизитов в этапе 3 — прямой API
+`publication.pravo.gov.ru/api/Documents`, а не MCP.
 
 ## Осознанные компромиссы
 
@@ -179,7 +283,12 @@ upstream (сервер ходит по http://), `get_npa` стабильно 40
 |---|---|
 | Сессии в памяти, без БД | однопользовательский локальный инструмент; перезапуск = новый сеанс; миграция на SQLite тривиальна |
 | Маркер судьи вместо structured output | надёжность на cheap-моделях |
-| Явный шаг норм вместо tool calling | работает с любой моделью; tool calling в стриме хрупок на дешёвых |
+| Единый Evidence Pack до прений вместо per-turn поиска норм | 4 LLM-вызова за прогон вместо 12+; все роли видят одинаковые подтверждённые источники |
+| Тексты статей из Консультанта (markitdown), не из официального PDF | официальный PDF — скан без текстового слоя (OCR — тяжёлая зависимость); текст честно помечен неофициальным |
+| `partially_verified` для pravo.gov.ru-источников | реквизиты подтверждены порталом, но текст статьи извлечён извне — нельзя поднимать до verified |
+| Практика ВС только из раздела Пленума | полнотекстового поиска по базе актов ВС на vsrf.ru нет; лучше честный раздел, чем ложное обещание |
+| Sudact/KadArbitr — disabled-заготовки | sudact требует JS-рендеринг (Playwright/Chromium — тяжёлая зависимость и хрупкость), kad.arbitr — капча; лучше `unavailable`, чем хрупкий парсер |
+| Маркер судьи вместо structured output | надёжность на cheap-моделях |
 | Остановка только между репликами | аборты стрима ломают клиентскую сессию роутера |
 | `LlmResult(str)` | zero-cost совместимость с 6 точками вызова |
 | PDF через печать браузера | WeasyPrint/wkhtmltopdf на Windows — лишние зависимости для MVP |

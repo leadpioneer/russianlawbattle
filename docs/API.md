@@ -128,12 +128,89 @@ Multipart: `files[]` (PDF/DOCX/TXT/MD) + поле `context` (текст, мож�
 ### `GET /api/report/{session_id}/download`
 Markdown-файл отчёта как вложение. `409`, если отчёта нет.
 
+## Правовой research layer (этап 3)
+
+### `GET /api/session/{session_id}/evidence`
+Evidence Pack сессии: карточки источников (LAW/CASE/DOC) со статусами верификации,
+выдержками, URL первоисточника; статусы провайдеров; `case_law_coverage`
+(searched/not_searched/coverage/warning); warnings. Читается из
+`sessions/<id>/evidence_pack.json`.
+Ошибки: `404` — сессии нет; `409` — pack ещё не собран (запустите симуляцию).
+
+Формат (типы фронтенда — `web/lib/api.ts`):
+
+```jsonc
+{
+  "case_id": "…", "jurisdiction": "…", "generated_at": "…",
+  "legal_issues": ["…"],
+  "sources": [{
+    "id": "LAW-001", "source_type": "statute",
+    "title": "…", "authority": "pravo.gov.ru", "citation": "…",
+    "excerpt": "точная выдержка или пусто",
+    "official_url": "https://publication.pravo.gov.ru/document/…",
+    "effective_date": "2026-07-26", "decision_date": null,
+    "case_number": null, "court": null,
+    "verified": false,
+    "verification_status": "partially_verified",
+    "provider": "pravo_gov", "retrieved_at": "…",
+    "relevance_score": 0.0, "supports_issues": [],
+    "warning": "…", "authority_level": null
+  }],
+  "provider_statuses": [{
+    "provider": "pravo_gov", "status": "healthy", "transport": "direct_api",
+    "checked_at": "…", "capabilities": ["statutes"], "message": "…"
+  }],
+  "warnings": ["…"],
+  "case_law_coverage": {
+    "searched_sources": ["supreme_court_official"],
+    "not_searched_sources": ["kad_arbitr", "sudact"],
+    "coverage": "official_only",   // official_only | limited | unavailable
+    "warning": "…"
+  }
+}
+```
+
+### `GET /api/legal/health`
+Healthcheck всех правовых провайдеров (без запуска симуляции):
+
+```jsonc
+{
+  "checked_at": "2026-09-06T19:13:37",
+  "providers": [
+    { "provider": "supreme_court_official", "status": "healthy",
+      "transport": "direct_api", "checked_at": "…",
+      "capabilities": ["case_law"], "message": "…" },
+    { "provider": "pravo_gov", "status": "healthy", "…": "…" }
+  ]
+}
+```
+
+### `POST /api/legal/diagnostics`
+Полная диагностика pravo-mcp (шаг 1 этапа 3). Тело опционально:
+`{"query": "статья 309 ГК РФ"}`. → структурированный отчёт:
+
+```jsonc
+{
+  "target": "pravo-mcp (MCP pravo.gov.ru)",
+  "started_at": "…", "duration_s": 3.4, "ok": true,
+  "checks": [
+    { "check": "package", "status": "ok", "details": {…},
+      "error_type": null, "error_chain": [], "suggested_action": null },
+    // package, config, transport, mcp_session, search_probe, document_completeness
+  ]
+}
+```
+`ok=false`, если хотя бы один check в статусе `fail` (warn/skip не считаются
+провалом). CLI-эквивалент: `python -m src.legal_diagnostics --json`.
+
 ## WebSocket
 
 ### `WS /ws/session/{session_id}`
 
 - На подключении — `{"type": "status", "payload": {"status": "…", "target_side": "…"}}`;
-- далее поток `DebateEvent` в JSON (таблица типов — ARCHITECTURE.md);
+- далее поток `DebateEvent` в JSON (таблица типов — ARCHITECTURE.md); в этапе 3
+  добавлены события `legal_research_started`, `provider_status`,
+  `legal_source_found`, `evidence_pack_ready` (перед прениями);
 - события буферизуются на сервере: **при переподключении клиент получает их с начала
   (replay)**, затем новые (опрос новых — раз в 0.2 с); несколько клиентов — независимые
   ленты;
@@ -141,8 +218,9 @@ Markdown-файл отчёта как вложение. `409`, если отчё
   событие `error` и close.
 
 Типовой клиентский цикл (как в `web/lib/api.ts`): слушать до закрытия, затем
-`GET /api/report/…` — `200` → финальный экран, `409` → сессия `stopped`/`error` →
-возврат к материалам.
+`GET /api/report/…` — `200` → финальный экран (+ параллельно
+`GET /api/session/{id}/evidence` для секции «Правовые источники»), `409` → сессия
+`stopped`/`error` → возврат к материалам.
 
 ## Пример сквозного сценария (PowerShell)
 

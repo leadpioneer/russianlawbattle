@@ -1,6 +1,6 @@
 ﻿# Судебный симулятор (court-simulator)
 
-Текущая версия: **v0.4.0** · [История изменений](CHANGELOG.md) · [Архитектура](docs/ARCHITECTURE.md) · [API](docs/API.md) · [Для разработчиков](docs/DEVELOPMENT.md)
+Текущая версия: **v0.4.0** · [История изменений](CHANGELOG.md) · [Архитектура](docs/ARCHITECTURE.md) · [API](docs/API.md) · [Для разработчиков](docs/DEVELOPMENT.md) · [Отчёт по спринту (этап 3)](docs/SPRINT_REPORT.md)
 
 Веб-приложение для **подготовки к судебному спору на этапе досудебной претензии**:
 пользователь описывает ситуацию и загружает документы, три LLM-агента — **юрист
@@ -43,34 +43,39 @@ CLI остался как debug-режим разработчика: `python -m 
 ## Как это работает
 
 ```
-START → init → claimant_turn → defendant_turn → judge_review ──┐
-                   ↑                                           │
-                   └── (судья: ПРОДОЛЖАТЬ и раунды < max) ──────┤
-                                                               └─→ final_verdict
-                                                                     → recommendations → END
+START → init → build_evidence_pack → claimant_turn → defendant_turn
+                    → judge_review ──┐
+      ↑ ── (судья: ПРОДОЛЖАТЬ и раунды < max) ──────┤
+                                                    └─→ final_verdict
+                                                          → recommendations → END
 ```
 
 - **init** — загрузка конфига и материалов дела, подготовка состояния.
+- **build_evidence_pack** — правовое исследование (этап 3): из материалов дела
+  извлекаются правовые вопросы, провайдеры (pravo.gov.ru, vsrf.ru) находят нормы
+  и документы, пользовательские судебные акты классифицируются; собирается
+  **Evidence Pack** с честными статусами верификации — единый для всех трёх ролей.
 - **claimant_turn / defendant_turn** — реплики юристов: каждый видит всю историю
-  прений и опирается только на факты из материалов дела (со ссылками на источники).
+  прений, опирается только на факты из материалов дела и источники Evidence Pack
+  (со ссылками [LAW-XXX]).
 - **judge_review** — судья *не спорит*: оценивает аргументы и решает — задать
   уточняющий вопрос стороне/сторонам (машиночитаемый маркер
   `=== РЕШЕНИЕ СУДЬИ: ПРОДОЛЖАТЬ (кому: …) ===`) или завершить процесс
   (`ЗАВЕРШИТЬ`). `max_rounds` — жёсткий предохранитель.
-- **final_verdict** — мотивированное решение: обстоятельства, оценка позиций,
-  правовое обоснование, резолютивная часть, судебные расходы.
+- **final_verdict** — мотивированное решение + **linter правовых ссылок**: все
+  упоминания статей/актов сверяются с Evidence Pack; непроверенные убираются
+  (repair-pass) или помечаются в отчёте.
 - **recommendations** — ИИ-аналитик готовит блок рекомендаций для стороны,
   выбранной пользователем: сильные стороны, слабые места, риски в суде, правки
-  текста ответа на претензию и качественный прогноз (высокие/средние/низкие).
+  текста ответа на претензию и качественный прогноз (высокие/средние/низкие);
+  тоже проходит linter ссылок.
 
-**Подтверждение норм права.** Перед каждой репликой модель формулирует 1–2
-поисковых запроса (название акта или номер, например «152-ФЗ»), запросы уходят
-через MCP в `pravo-mcp` → официальный портал pravo.gov.ru; найденные реквизиты
-(номер, дата, ссылка на официальную публикацию) попадают в промпт агента как
-«ПРОВЕРЕННЫЕ НОРМЫ ПРАВА» и выводятся в отчёт. Если MCP недоступен — симуляция
-продолжается, а в отчёте появляется предупреждение: «нормы права не подтверждены
-внешним источником, ссылки модели требуют проверки». Тексты статей не
-загружаются — сверяйте содержание по ссылкам на публикации.
+**Подтверждение норм права.** Реквизиты актов (номер, дата, ссылка на официальную
+публикацию) подтверждает pravo.gov.ru; тексты статей добираются через внешний
+источник и помечаются как неофициальные. Если источники недоступны — симуляция
+продолжается в деградировавшем режиме: агенты получают инструкцию не утверждать
+точные нормы, а в отчёте появляется предупреждение о ручной проверке. Подробности
+— в разделе «Правовые источники и надёжность ссылок» ниже.
 
 Юрисдикция из настроек подставляется во все системные промпты; для РФ это ГК РФ,
 ГПК/АПК и профильные законы с прямым запретом выдумывать номера статей. Каждое
@@ -188,19 +193,33 @@ python -m src.main config                  # показать конфигура
 ├── case_files/             # документы дела для CLI-прогонов
 ├── output/                 # протоколы verdict_<timestamp>.md
 ├── sessions/               # материалы веб-сессий (gitignore)
+├── tests/                  # pytest: 105 тестов (legal layer, graph, api-модели)
+├── docs/                   # ARCHITECTURE, API, DEVELOPMENT, SPRINT_REPORT
 ├── web/                    # Next.js-фронтенд (App Router, TS, Tailwind)
-│   └── lib/api.ts          #   клиент REST + WebSocket
+│   └── lib/api.ts          #   клиент REST + WebSocket, типы EvidencePack
 └── src/
     ├── config.py           # загрузка и валидация конфига (.env + config.yaml)
     ├── llm_client.py       # универсальный клиент, модель по роли, стриминг, логи
     ├── document_loader.py  # чтение case_files + case_context, лимит/суммаризация
-    ├── agents/             # base, юристы, judge, advisor (рекомендации), legal_context
-    ├── graph.py            # LangGraph: узлы, события DebateEvent, run_debate()
-    ├── legal_tools.py      # MCP-клиент pravo-mcp: search_law() → pravo.gov.ru
+    ├── agents/             # base, юристы, judge, advisor, legal_context (legacy)
+    ├── graph.py            # LangGraph: build_evidence_pack, прения, linter, события
+    ├── legal_tools.py      # DEPRECATED-фасад pravo-mcp (сносится)
+    ├── legal_diagnostics.py# CLI диагностики: python -m src.legal_diagnostics
     ├── session_store.py    # веб-сессии: в памяти + каталоги sessions/<id>/
-    ├── api.py              # FastAPI: REST + WebSocket /ws/session/{id}
-    ├── report.py           # markdown-протокол (прения + нормы + рекомендации)
-    └── main.py             # typer-CLI (debug): run / config
+    ├── api.py              # FastAPI: REST + WS + evidence/legal endpoints
+    ├── report.py           # markdown-протокол (+ разделы этапа 3, дисклеймер)
+    ├── main.py             # typer-CLI (debug): run / config
+    └── legal/              # ПРАВОВОЙ RESEARCH LAYER (этап 3)
+        ├── models.py       #   LegalSource / EvidencePack / ProviderHealth
+        ├── service.py      #   LegalResearchService: провайдеры, coverage
+        ├── providers/      #   pravo_gov, supreme_court, mock, base
+        ├── converters.py   #   тексты статей (Консультант + markitdown)
+        ├── case_law.py     #   user-акты (USER), coverage, disabled-расширения
+        ├── citation_verifier.py  # linter ссылок + repair-pass
+        ├── issue_extractor.py    # правовые вопросы дела (LLM + fallback)
+        ├── evidence_pack.py      # сборка + persist в сессию
+        ├── prompts.py            # строгий prompt-блок для агентов
+        └── diagnostics.py        # диагностика pravo-mcp
 ```
 
 ## Правовые источники и надёжность ссылок (этап 3)
