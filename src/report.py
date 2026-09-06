@@ -77,6 +77,46 @@ def render_report(result: DebateResult, generated_at: datetime | None = None) ->
         lines += [f"- {norm.title} [{norm.source_url}]" for norm in result.verified_norms]
         lines.append("")
 
+    # Разделение источников этапа 3 (шаг 8): разъяснения ВС / практика / user-документы.
+    pack = result.evidence_pack
+    if pack is not None:
+        supreme = [s for s in pack.sources if s.source_type in ("supreme_court", "official_explanation")]
+        similar_practice = [s for s in pack.sources if s.source_type == "case_law" and s.provider == "user_document"]
+        user_docs = [s for s in pack.sources if s.source_type == "user_document"]
+
+        if supreme:
+            lines += ["## Официальные разъяснения и позиции ВС РФ", ""]
+            for source in supreme:
+                line = f"- **{source.citation}** — {source.authority}"
+                if source.decision_date:
+                    line += f", от {source.decision_date}"
+                if source.official_url:
+                    line += f" [{source.official_url}]"
+                lines.append(line)
+            lines.append("")
+        if similar_practice:
+            lines += ["## Сходная судебная практика (загружена пользователем)", ""]
+            lines += [
+                "> Это единичные судебные акты, приложенные к делу. Они не являются "
+                "нормами права; их применимость к обстоятельствам спора требует "
+                "проверки фактического сходства.",
+                "",
+            ]
+            for source in similar_practice:
+                line = f"- [{source.id}] ({source.authority_level}) {source.title}"
+                if source.case_number:
+                    line += f", дело {source.case_number}"
+                if source.court:
+                    line += f" ({source.court})"
+                lines.append(line)
+            lines.append("")
+        if user_docs:
+            lines += ["## Материалы, загруженные пользователем", ""]
+            lines += [f"- [{source.id}] {source.title} ({source.source_type})" for source in user_docs]
+            lines.append("")
+        if pack.case_law_coverage is not None:
+            lines += ["## Покрытие поиска судебной практики", "", pack.case_law_coverage.user_facing_message(), ""]
+
     if result.citation_results:
         lines += ["## Проверка правовых ссылок", ""]
         for section, check in result.citation_results:

@@ -692,6 +692,7 @@ def _run_evidence_pack(
             free_text_query=free_text_query,
             use_llm=True,
             service=service,
+            materials=materials,
         )
         for source in pack.sources:
             emit(

@@ -32,8 +32,8 @@ const MODEL_PRESETS: { label: string; value: string }[] = [
   { label: "Qwen — средний китаец", value: "qwen/qwen3.8-max-0902" },
   { label: "DeepSeek — другой китаец", value: "~deepseek/deepseek-v4-pro-latest" },
   { label: "Grok", value: "~x-ai/grok-latest" },
-  { label: "the model (последний)", value: "~anthropic/claude-sonnet-latest" },
-  { label: "the model (последний)", value: "~anthropic/claude-opus-latest" },
+  { label: "Claude Sonnet (последний)", value: "~anthropic/claude-sonnet-latest" },
+  { label: "Claude Opus (последний)", value: "~anthropic/claude-opus-latest" },
   { label: "Kimi (последний)", value: "~moonshotai/kimi-latest" },
   { label: "GPT-6 Astra (богоподобная)", value: "openai/gpt-6-astra" },
 ];
