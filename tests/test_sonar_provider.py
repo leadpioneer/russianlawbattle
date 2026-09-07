@@ -161,6 +161,68 @@ def test_service_uses_session_legal_research():
     assert service.legal_research == {"web_search": False}
 
 
+# -------------------------------------------------------------------------
+# configure(): настройки веб-сессии переопределяют config.yaml (регрессия:
+# выбор модели поиска в UI игнорировался — провайдер читал глобальный yaml)
+# -------------------------------------------------------------------------
+
+
+class _FakeSessionConfig:
+    """Минимальный аналог Config сессии без обращения к файлам."""
+
+    def __init__(self, base_url, api_key, legal_research):
+        self.api_base_url = base_url
+        self.api_key = api_key
+        self.legal_research = legal_research
+
+
+def test_configure_applies_session_model_over_yaml(monkeypatch):
+    provider = SonarWebSearchProvider()  # конструктор читает глобальный yaml/env
+    # Глобальный yaml «хочет» sonar-pro-search…
+    monkeypatch.setattr(
+        provider, "_model_from_config", lambda: "perplexity/sonar-pro-search", raising=False
+    )
+    provider._model = provider._model or "perplexity/sonar-pro-search"
+    # …но сессия выбрала базовый sonar — сессия побеждает.
+    session_cfg = _FakeSessionConfig(
+        "https://other-router.example/api/v1",
+        "sk-session-key",
+        {"web_search": True, "search_model": "perplexity/sonar"},
+    )
+    provider.configure(session_cfg)
+    assert provider._model == "perplexity/sonar"
+    assert provider._base_url == "https://other-router.example/api/v1"
+    assert provider._api_key == "sk-session-key"
+
+
+def test_configure_without_session_model_keeps_previous(monkeypatch):
+    provider = SonarWebSearchProvider(model="perplexity/sonar")
+    monkeypatch.delenv("SONAR_MODEL", raising=False)
+    session_cfg = _FakeSessionConfig(
+        "https://routerai.ru/api/v1", "sk-x", {"web_search": True}
+    )
+    provider.configure(session_cfg)
+    assert provider._model == "perplexity/sonar"  # алиас не задан в сессии — не трогаем
+    assert provider._base_url == "https://routerai.ru/api/v1"
+    assert provider._credentials() == ("https://routerai.ru/api/v1", "sk-x")
+
+
+def test_service_configure_reaches_sonar_provider(monkeypatch):
+    from src.legal.service import LegalResearchService
+
+    service = LegalResearchService(
+        legal_research={"web_search": True, "search_model": "perplexity/sonar"}
+    )
+    session_cfg = _FakeSessionConfig(
+        "https://session-router.example/v1", "sk-session", {"search_model": "perplexity/sonar"}
+    )
+    service.configure(session_cfg)
+    sonar = next(p for _, p in service.providers if p.name == "sonar_web_search")
+    assert sonar._model == "perplexity/sonar"  # noqa: SLF001
+    assert sonar._base_url == "https://session-router.example/v1"  # noqa: SLF001
+    assert sonar._api_key == "sk-session"  # noqa: SLF001
+
+
 
 def test_unknown_sonar_model_env_override(monkeypatch):
     monkeypatch.setenv("SONAR_MODEL", "perplexity/sonar")

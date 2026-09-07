@@ -133,6 +133,18 @@ class LegalResearchService:
             self._configs = default_provider_configs(self.legal_research)
         self.providers = build_providers(self._configs)
 
+    def configure(self, cfg) -> None:
+        """Применить конфиг сессии к провайдерам (роутер/ключ/модель поиска).
+
+        Провайдеры, созданные реестром без аргументов, иначе берут креденшелы
+        и алиасы из глобального config.yaml — настройки веб-сессии игнорируются.
+        Провайдеры без ``configure`` (не требующие креденшеллов) пропускаются.
+        """
+        for _, provider in self.providers:
+            configure = getattr(provider, "configure", None)
+            if callable(configure):
+                configure(cfg)
+
     # -- health -----------------------------------------------------------
 
     async def healthcheck_all(self) -> list[ProviderHealth]:

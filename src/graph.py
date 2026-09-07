@@ -802,6 +802,7 @@ def _run_evidence_pack(
     service = LegalResearchService(  # одна точка: и healthcheck, и research
         legal_research=getattr(cfg, "legal_research", None)
     )
+    service.configure(cfg)  # роутер/ключ/модель поиска — из конфига сессии, не yaml
 
     async def _status_forwarder():
         statuses = await service.healthcheck_all()

@@ -199,6 +199,19 @@ class SonarWebSearchProvider:
         cfg = load_config()
         return cfg.api_base_url, cfg.api_key
 
+    def configure(self, cfg) -> None:
+        """Применить конфиг сессии: роутер/ключ/алиас модели (переопределяет yaml).
+
+        Вызывается сервисом перед research — без этого провайдер взял бы
+        base_url/api_key/модель из глобального config.yaml, а не из настроек
+        веб-сессии (баг: выбор модели поиска в UI игнорировался).
+        """
+        self._base_url = cfg.api_base_url
+        self._api_key = cfg.api_key
+        session_model = (cfg.legal_research or {}).get("search_model")
+        if isinstance(session_model, str) and session_model.strip():
+            self._model = session_model.strip()
+
     def _ask(self, query: str, kind: str, limit: int) -> tuple[dict, TokenUsage]:
         """Один запрос к sonar; возвращает (payload, usage). Бросает исключения."""
         if self._post is not None:
