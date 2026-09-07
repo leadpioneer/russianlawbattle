@@ -35,6 +35,31 @@ _clients: dict[str, OpenAI] = {}
 #: Таймаут HTTP-запроса к роутеру, секунды (LLM-ответы бывают долгими).
 REQUEST_TIMEOUT_SECONDS = 180.0
 
+#: Задержки между повторными попытками (сек) при транзитных сбоях роутера:
+#: пустой стрим без контента или ошибка API до начала генерации (429/5xx/таймаут).
+_RETRY_DELAYS: tuple[float, ...] = (2.0, 5.0)
+
+#: HTTP-статусы, при которых повтор запроса имеет смысл (транзитные сбои роутера).
+_RETRYABLE_STATUS_CODES = frozenset({408, 425, 429, 500, 502, 503, 504})
+
+
+def _is_retryable_api_error(exc: APIError) -> bool:
+    """Транзитная ли ошибка API: таймаут/обрыв соединения (без статуса) или 429/5xx."""
+    status = getattr(exc, "status_code", None)
+    return True if status is None else status in _RETRYABLE_STATUS_CODES
+
+
+def _empty_reason(finish_reason: str | None, reasoning_chars: int, usage: TokenUsage) -> str:
+    """Человекочитаемая причина пустого ответа модели (для лога и исключения)."""
+    parts: list[str] = []
+    if reasoning_chars:
+        parts.append(f"{reasoning_chars} симв. пришло в reasoning-полях без текста реплики")
+    if finish_reason:
+        parts.append(f"finish_reason={finish_reason}")
+    if usage.total_tokens:
+        parts.append(f"токены {usage.input_tokens}/{usage.output_tokens}")
+    return "; ".join(parts) or "стрим закрыт роутером без контента"
+
 
 @dataclass(frozen=True)
 class TokenUsage:
@@ -276,7 +301,8 @@ def chat(
         передаются роутеру через ``extra_body``; объединяются с ``cfg.llm_params``.
     :returns: полный текст ответа модели.
     :raises ConfigError: неизвестная роль или проблемы конфига.
-    :raises RuntimeError: ошибка API или пустой ответ модели.
+    :raises RuntimeError: ошибка API или пустой ответ модели
+        (после повторных попыток — транзитные сбои ретраятся автоматически).
     """
     cfg = get_config()
     model = cfg.model_for(role)
@@ -294,46 +320,107 @@ def chat(
         extra_body or "нет",
     )
     started = time.perf_counter()
-    chunks: list[str] = []
-    usage = EMPTY_USAGE
-    try:
-        with client.chat.completions.create(
-            model=model,
-            messages=payload,
-            temperature=temperature,
-            stream=True,
-            extra_body=extra_body or None,
-        ) as stream:
-            for event in stream:
-                # usage приходит в финальных событиях стрима (stream_options/include_usage
-                # или последний chunk у роутеров) — забираем каждый раз, последний победит.
-                event_usage = getattr(event, "usage", None)
-                if event_usage is not None:
-                    usage = TokenUsage.from_api(event_usage)
-                if not event.choices:
-                    continue
-                delta = event.choices[0].delta.content
-                if delta:
-                    chunks.append(delta)
-                    if on_delta is not None:
-                        on_delta(delta)
-    except APIError as exc:
-        raise RuntimeError(
-            f"Ошибка LLM API: роль={role} модель={model} роутер={cfg.api_base_url}: {exc}"
-        ) from exc
+    attempts = len(_RETRY_DELAYS) + 1
 
-    text = "".join(chunks).strip()
+    for attempt in range(1, attempts + 1):
+        chunks: list[str] = []
+        usage = EMPTY_USAGE
+        finish_reason: str | None = None
+        reasoning_chars = 0
+        try:
+            with client.chat.completions.create(
+                model=model,
+                messages=payload,
+                temperature=temperature,
+                stream=True,
+                extra_body=extra_body or None,
+            ) as stream:
+                for event in stream:
+                    # usage приходит в финальных событиях стрима (stream_options/include_usage
+                    # или последний chunk у роутеров) — забираем каждый раз, последний победит.
+                    event_usage = getattr(event, "usage", None)
+                    if event_usage is not None:
+                        usage = TokenUsage.from_api(event_usage)
+                    if not event.choices:
+                        continue
+                    choice = event.choices[0]
+                    if getattr(choice, "finish_reason", None):
+                        finish_reason = choice.finish_reason
+                    delta = choice.delta
+                    # Некоторые роутеры отдают текст/размышления reasoning-моделей
+                    # в extra-полях дельты (reasoning_content и т.п.) — учитываем
+                    # в диагностике, но в текст реплики не добавляем.
+                    for extra_field in ("reasoning_content", "reasoning"):
+                        extra_delta = getattr(delta, extra_field, None) or (
+                            getattr(delta, "model_extra", None) or {}
+                        ).get(extra_field)
+                        if extra_delta:
+                            reasoning_chars += len(extra_delta)
+                    content = getattr(delta, "content", None)
+                    if content:
+                        chunks.append(content)
+                        if on_delta is not None:
+                            on_delta(content)
+        except APIError as exc:
+            retryable = _is_retryable_api_error(exc)
+            if not retryable or attempt >= attempts or chunks:
+                # chunks непуст → контент уже ушёл в on_delta/UI: повтор дал бы
+                # дубликат реплики, поэтому частично полученный стрим не ретраим.
+                raise RuntimeError(
+                    f"Ошибка LLM API: роль={role} модель={model} "
+                    f"роутер={cfg.api_base_url}: {exc}"
+                ) from exc
+            delay = _RETRY_DELAYS[attempt - 1]
+            logger.warning(
+                "LLM API (попытка %d/%d, роль=%s модель=%s): транзитная ошибка, "
+                "повтор через %s с: %s",
+                attempt,
+                attempts,
+                role,
+                model,
+                delay,
+                exc,
+            )
+            time.sleep(delay)
+            continue
+
+        text = "".join(chunks).strip()
+        if text:
+            break  # успешная генерация — выходим из цикла попыток
+
+        # Пустой ответ: транзитный сбой роутера — пробуем ещё раз.
+        reason = _empty_reason(finish_reason, reasoning_chars, usage)
+        if attempt >= attempts:
+            elapsed = time.perf_counter() - started
+            raise RuntimeError(
+                f"Модель {model} (роль {role}) вернула пустой ответ после {attempts} попыток "
+                f"({reason}; суммарно {elapsed:.0f}с). Обычно это транзитный сбой роутера — "
+                "перезапустите симуляцию; если повторяется, смените модель роли в конфиге."
+            )
+        delay = _RETRY_DELAYS[attempt - 1]
+        logger.warning(
+            "LLM-ответ пуст (попытка %d/%d, роль=%s модель=%s): %s — повтор через %s с",
+            attempt,
+            attempts,
+            role,
+            model,
+            reason,
+            delay,
+        )
+        time.sleep(delay)
+
     elapsed = time.perf_counter() - started
     logger.info(
-        "LLM-ответ: роль=%s модель=%s роутер=%s длина=%d симв. время=%.1fс токены=%s",
+        "LLM-ответ: роль=%s модель=%s роутер=%s длина=%d симв. время=%.1fс "
+        "попытка=%d/%d токены=%s",
         role,
         model,
         cfg.api_base_url,
         len(text),
         elapsed,
+        attempt,
+        attempts,
         f"{usage.input_tokens}/{usage.output_tokens}" if usage.total_tokens else "нет данных",
     )
-    if not text:
-        raise RuntimeError(f"Модель {model} (роль {role}) вернула пустой ответ.")
     _usage_log.append((role, model, usage))
     return LlmResult(text, usage)
