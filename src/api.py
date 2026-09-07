@@ -360,6 +360,29 @@ def stop_debate_endpoint(session_id: str) -> dict:
     return {"session_id": session.id, "status": "stopping"}
 
 
+@app.post("/api/session/{session_id}/evidence-answer")
+def evidence_answer_endpoint(session_id: str, payload: dict) -> dict:
+    """Ответ human-in-the-loop: доказательство по запросу суда.
+
+    Тело: ``{"text": "что показало доказательство"}`` (пусто/whitespace =
+    «не представлено»). Прения продолжаются.
+    """
+    session = _get_session_or_404(session_id)
+    if not session.evidence_request:
+        raise HTTPException(
+            status_code=409,
+            detail="Суд не запрашивал доказательство (или ответ уже принят).",
+        )
+    text = str(payload.get("text") or "")
+    if not session.provide_evidence(text):
+        raise HTTPException(
+            status_code=409,
+            detail="Суд не запрашивал доказательство (или ответ уже принят).",
+        )
+    logger.info("Сессия %s: доказательство получено (%d симв.).", session_id, len(text))
+    return {"session_id": session.id, "status": "accepted", "provided": bool(text.strip())}
+
+
 @app.websocket("/ws/session/{session_id}")
 async def ws_session(websocket: WebSocket, session_id: str) -> None:
     """Живой поток событий симуляции.

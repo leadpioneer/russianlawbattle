@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { DebateEvent, DefaultsData, TargetSide } from "@/lib/api";
-import { API_BASE, checkHealth, connectSessionSocket, createSession, currencySymbol, fetchDefaults, fetchEvidence, fetchReport, reportDownloadUrl, startRun, stopDebate, uploadCase } from "@/lib/api";
+import { API_BASE, checkHealth, connectSessionSocket, createSession, currencySymbol, fetchDefaults, fetchEvidence, fetchReport, reportDownloadUrl, startRun, stopDebate, submitEvidenceAnswer, uploadCase } from "@/lib/api";
 
 /** Ключ localStorage с настройками формы (восстанавливаются при следующем открытии). */
 const SETTINGS_KEY = "court-sim-settings-v1";
@@ -264,6 +264,9 @@ export default function Home() {
   // legal_research_started до evidence_pack_ready/первого agent_start.
   const [researching, setResearching] = useState(false);
   const [researchFound, setResearchFound] = useState(0);
+  // Human-in-the-loop: суд запросил доказательство → контекстное окно.
+  const [evidenceModal, setEvidenceModal] = useState<{ request: string } | null>(null);
+  const [evidenceText, setEvidenceText] = useState("");
   const socketRef = useRef<WebSocket | null>(null);
 
   // --- итог ---
@@ -405,6 +408,11 @@ export default function Home() {
             setResearchFound((prev) => prev + 1);
           } else if (event.type === "evidence_pack_ready") {
             setResearching(false);
+          } else if (event.type === "evidence_request") {
+            setEvidenceModal({ request: String(event.payload?.request ?? "") });
+            setEvidenceText("");
+          } else if (event.type === "evidence_provided") {
+            setEvidenceModal(null); // окно закрывается в любом случае
           } else if (event.type === "judge_decision") {
             const verb = event.requalify
               ? "ПЕРЕКВАЛИФИКАЦИЯ"
@@ -467,6 +475,22 @@ export default function Home() {
       setBusy(false);
     }
   }, []);
+
+  /** Представить доказательство по запросу суда (human-in-the-loop). */
+  const handleEvidenceSubmit = useCallback(
+    async (text: string) => {
+      const sessionId = sessionIdRef.current;
+      if (!sessionId) return;
+      try {
+        await submitEvidenceAnswer(sessionId, text);
+        setEvidenceModal(null);
+        setEvidenceText("");
+      } catch (err) {
+        setError(err instanceof Error ? err.message : String(err));
+      }
+    },
+    [],
+  );
 
   /** Добавить файлы (drag-and-drop или проводник) с клиентской фильтрацией. */
   const addFiles = useCallback((incoming: File[]) => {
@@ -1014,6 +1038,59 @@ export default function Home() {
       {/* --- ЭКРАН 3: ПРЯМОЙ ЭФИР --- */}
       {stage === "live" && (
         <section className="flex flex-col gap-3">
+          {evidenceModal && (
+            <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 p-4">
+              <div className="w-full max-w-lg rounded-xl border border-amber-300 bg-white p-5 shadow-lg">
+                <h3 className="mb-2 text-base font-bold text-amber-800">
+                  ⚖ Суд запросил доказательство
+                </h3>
+                <p className="mb-3 rounded-lg bg-amber-50 px-3 py-2 text-sm text-amber-900">
+                  {evidenceModal.request}
+                </p>
+                <label className="block text-sm">
+                  <span className="mb-1 block font-medium">
+                    Что показало доказательство (в этом конкретном случае)?
+                  </span>
+                  <textarea
+                    autoFocus
+                    rows={5}
+                    className="w-full rounded-lg border border-slate-300 px-3 py-2"
+                    value={evidenceText}
+                    onChange={(e) => setEvidenceText(e.target.value)}
+                    placeholder="Например: экспертиза установила производственный характер недостатка; свидетель подтвердил…; выписка показывает перевод…"
+                  />
+                </label>
+                <div className="mt-3 flex justify-end gap-2">
+                  <button
+                    type="button"
+                    className="rounded-lg border border-slate-300 px-4 py-2 text-sm font-medium text-slate-600 hover:bg-slate-50"
+                    onClick={() => handleEvidenceSubmit("")}
+                  >
+                    Не представлять
+                  </button>
+                  <button
+                    type="button"
+                    className="rounded-lg bg-amber-600 px-4 py-2 text-sm font-medium text-white hover:bg-amber-700"
+                    onClick={() => handleEvidenceSubmit(evidenceText)}
+                  >
+                    Представить
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+          {evidenceModal && (
+            <div className="flex items-center gap-3 rounded-xl border border-slate-300 bg-slate-100 px-4 py-3 shadow-sm">
+              <span className="flex gap-1">
+                <span className="h-2 w-2 animate-bounce rounded-full bg-slate-500" />
+                <span className="h-2 w-2 animate-bounce rounded-full bg-slate-500 [animation-delay:150ms]" />
+                <span className="h-2 w-2 animate-bounce rounded-full bg-slate-500 [animation-delay:300ms]" />
+              </span>
+              <span className="text-sm font-medium text-slate-700">
+                ⏸ Прения на паузе — суд ждёт доказательство…
+              </span>
+            </div>
+          )}
           {researching && (
             <div className="flex items-center gap-3 rounded-xl border border-amber-300 bg-amber-50 px-4 py-3 shadow-sm">
               <span className="flex gap-1">
@@ -1328,7 +1405,7 @@ export default function Home() {
 
       <footer className="mt-8 text-center text-xs text-slate-400 no-print">
         ИИ-инструмент подготовки к спору. Не заменяет консультацию практикующего юриста.
-        <br />v0.6.0
+        <br />v0.7.0
       </footer>
     </main>
   );

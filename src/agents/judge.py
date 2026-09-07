@@ -30,7 +30,8 @@ logger = logging.getLogger(__name__)
 
 #: Маркер решения судьи в конце ответа (парсится графом).
 _MARKER_RE = re.compile(
-    r"===\s*РЕШЕНИЕ\s+СУДЬИ:\s*(ПРОДОЛЖАТЬ|ЗАВЕРШИТЬ|ПЕРЕКВАЛИФИКАЦИЯ)"
+    r"===\s*РЕШЕНИЕ\s+СУДЬИ:\s*"
+    r"(ПРОДОЛЖАТЬ|ЗАВЕРШИТЬ|ПЕРЕКВАЛИФИКАЦИЯ|ТРЕБУЕТСЯ\s+ДОКАЗАТЕЛЬСТВО)"
     r"(?:\s*\(кому:\s*(claimant_lawyer|defendant_lawyer|both)\s*\))?"
     r"(?:\s*:\s*([^=]*?))?\s*===",
     re.IGNORECASE,
@@ -43,6 +44,7 @@ _JUDGE_MARKER_INSTRUCTION = """\
 === РЕШЕНИЕ СУДЬИ: ПРОДОЛЖАТЬ (кому: both) ===
 === РЕШЕНИЕ СУДЬИ: ЗАВЕРШИТЬ ===
 === РЕШЕНИЕ СУДЬИ: ПЕРЕКВАЛИФИКАЦИЯ: <краткое описание нового характера спора> ===
+=== РЕШЕНИЕ СУДЬИ: ТРЕБУЕТСЯ ДОКАЗАТЕЛЬСТВО: <что требуется> ===
 ПРОДОЛЖАТЬ — если требуется уточнение или новые аргументы (укажи, кому адресован вопрос);
 ЗАВЕРШИТЬ — если материалов и аргументов достаточно для решения;
 ПЕРЕКВАЛИФИКАЦИЯ — если в прениях выяснилось, что ХАРАКТЕР СПОРА изменился и применить
@@ -51,7 +53,14 @@ _JUDGE_MARKER_INSTRUCTION = """\
 прибыли (перепродажа, аренда, предпринимательство) — Закон о защите прав потребителей
 неприменим, спор должен рассматриваться по общим нормам ГК РФ. В маркере после двоеточия
 кратко укажи новый характер спора. Раунд не прекращай: дай оценку сказанному и направь
-стороны на обсуждение нового характера спора — нормативная база будет собрана заново."""
+стороны на обсуждение нового характера спора — нормативная база будет собрана заново.
+ТРЕБУЕТСЯ ДОКАЗАТЕЛЬСТВО — используй ТОЛЬКО когда исход дела критически зависит от
+доказательства, которого нет в материалах (судебная экспертиза, показания свидетеля,
+банковская выписка, документы от стороны). В маркере после двоеточия кратко укажи,
+какое доказательство требуется и какой вопрос оно должно разрешить. Не запрашивай
+доказательства без необходимости — если спор можно разрешить на имеющихся материалах,
+завершай процесс. По результатам маркера суд получит доказательство, и оно будет
+приобщено к материалам дела."""
 
 
 @dataclass(frozen=True)
@@ -63,6 +72,7 @@ class JudgeDecision:
     question: str  # текст судьи без строки-маркера
     requalify: bool = False  # True — характер спора изменился, нужен повторный research
     requalify_reason: str = ""  # новый характер спора (из маркера после двоеточия)
+    request_evidence: str = ""  # непусто — суд запрашивает доказательство (что именно)
 
 
 def build_review_prompt(cfg: Config, materials: CaseMaterials) -> str:
@@ -88,7 +98,7 @@ def parse_judge_decision(text: str) -> JudgeDecision:
     if match is None:
         logger.warning("Судья не оставил маркер решения — трактуем как ПРОДОЛЖАТЬ (both).")
         return JudgeDecision(continues=True, addressee="both", question=text.strip())
-    verb = match.group(1).upper()
+    verb = match.group(1).upper().replace("  ", " ")
     addressee = (match.group(2) or "").lower()
     reason = (match.group(3) or "").strip()
     question = text[: match.start()].strip()
@@ -100,6 +110,13 @@ def parse_judge_decision(text: str) -> JudgeDecision:
             requalify=True,
             requalify_reason=reason,
         )
+    elif verb == "ТРЕБУЕТСЯ ДОКАЗАТЕЛЬСТВО":
+        decision = JudgeDecision(
+            continues=True,
+            addressee="both",
+            question=question,
+            request_evidence=reason,
+        )
     else:
         decision = JudgeDecision(
             continues=(verb == "ПРОДОЛЖАТЬ"),
@@ -108,7 +125,8 @@ def parse_judge_decision(text: str) -> JudgeDecision:
         )
     logger.info(
         "Решение судьи: %s (кому: %s).",
-        "ПЕРЕКВАЛИФИКАЦИЯ" if decision.requalify
+        "ТРЕБУЕТСЯ ДОКАЗАТЕЛЬСТВО" if decision.request_evidence
+        else "ПЕРЕКВАЛИФИКАЦИЯ" if decision.requalify
         else ("ПРОДОЛЖАТЬ" if decision.continues else "ЗАВЕРШИТЬ"),
         decision.addressee or "—",
     )

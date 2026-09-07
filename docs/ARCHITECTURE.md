@@ -117,6 +117,19 @@ research → прения → research.
 (GLM, Qwen) надёжно копируют текстовый шаблон и ненадёжно соблюдают JSON-схемы
 в streaming-режиме; маркер дёшев и детерминирован.
 
+### Human-in-the-loop: запрос доказательства
+
+Четвёртый маркер судьи: `=== РЕШЕНИЕ СУДЬИ: ТРЕБУЕТСЯ ДОКАЗАТЕЛЬСТВО: <что требуется> ===`
+(экспертиза, показания свидетеля, выписка — только когда исход дела критически зависит
+от отсутствующего доказательства). Поток симуляции **блокируется**: узел `judge_review`
+публикует WS-событие `evidence_request` и вызывает колбэк `wait_for_evidence(request)`
+(инъекция из `run_debate`, как `should_stop`). Веб-сессия ждёт `POST /api/session/{id}/evidence-answer`
+через `threading.Event` (таймаут 10 мин); CLI-прогон без колбэка сразу возвращает None.
+Ответ приобщается к `history` как запись суда («Доказательство приобщено/не представлено»)
+и виден всем агентам в следующих раундах. Лимит — `MAX_EVIDENCE_REQUESTS = 2` за процесс;
+запросы и ответы — в `DebateResult.evidence_requests` → раздел отчёта «Запросы
+доказательств в ходе процесса».
+
 ### Кооперативная остановка
 
 `run_debate(should_stop=callable)` → каждый узел **перед** LLM-вызовом проверяет
@@ -137,6 +150,8 @@ continues, addressee, payload`; `as_dict()` отдаёт словарь без `
 | `delta` | Фрагмент стрима | role, round, text | WS: append к тексту; CLI: stdout |
 | `agent_end` | Реплика готова | role, round, **text (полный)**, payload.usage | WS: замена текста, токены в счётчик |
 | `judge_decision` | Маркер разобран | continues, addressee, **payload.requalify, payload.requalify_reason** | WS: плашка ПРОДОЛЖАТЬ/ЗАВЕРШИТЬ/ПЕРЕКВАЛИФИКАЦИЯ |
+| `evidence_request` | Суд запросил доказательство | payload: request | WS: **модальное окно human-in-the-loop**; прения на паузе |
+| `evidence_provided` | Доказательство обработано | payload: request, answer, provided | WS: закрыть окно; отчёт: раздел запросов |
 | `verdict_done` | Вердикт готов | payload: length, usage | служебное |
 | `recommendations_done` | Рекомендации готовы | payload: target_side, prospects | служебное |
 | `debate_done` | Граф дошёл до конца | payload: rounds_played, finished_by_judge, statements, verdict_length, recommendations_prospects, **stopped**, **usage_log[]** | WS: close; CLI: итог |

@@ -274,6 +274,27 @@ export async function stopDebate(sessionId: string): Promise<void> {
   await ensureOk(await safeFetch(`${API_BASE}/api/stop/${sessionId}`, { method: "POST" }));
 }
 
+/** Ответ human-in-the-loop: доказательство по запросу суда. */
+export async function submitEvidenceAnswer(
+  sessionId: string,
+  text: string,
+): Promise<boolean> {
+  const res = await safeFetch(
+    `${API_BASE}/api/session/${sessionId}/evidence-answer`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text }),
+    },
+  );
+  if (!res.ok) {
+    const detail = await res.json().catch(() => ({}));
+    throw new Error(detail.detail ?? `HTTP ${res.status}`);
+  }
+  const data = await res.json();
+  return Boolean(data.provided);
+}
+
 export async function fetchReport(sessionId: string): Promise<ReportData> {
   const response = await ensureOk(
     await safeFetch(`${API_BASE}/api/report/${sessionId}?format=json`),

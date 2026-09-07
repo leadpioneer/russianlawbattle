@@ -54,6 +54,11 @@ def render_report(result: DebateResult, generated_at: datetime | None = None) ->
             f"правовое исследование выполнено {result.research_runs}×): "
             + "; ".join(result.requalifications)
         )
+    if result.evidence_requests:
+        lines.append(
+            f"- **⚖ Суд запрашивал доказательства** ({len(result.evidence_requests)}×) — "
+            "см. раздел «Запросы доказательств»."
+        )
     if result.legal_warning:
         lines.append(
             f"- **⚠ Предупреждение:** {result.legal_warning} — ссылки модели на нормы "
@@ -82,6 +87,23 @@ def render_report(result: DebateResult, generated_at: datetime | None = None) ->
         lines += [f"#### {statement.speaker_title}", "", statement.text.strip(), ""]
 
     lines += ["## Итоговое решение судьи", "", result.verdict.strip(), ""]
+
+    if result.evidence_requests:
+        lines += ["## Запросы доказательств в ходе процесса", ""]
+        for index, (request, answer, provided) in enumerate(result.evidence_requests, start=1):
+            status = "✅ приобщено" if provided else "❌ не представлено"
+            lines += [
+                f"### Запрос {index}: {request} — {status}",
+                "",
+            ]
+            if provided:
+                lines += ["> " + answer.replace("\n", "\n> "), ""]
+            else:
+                lines += [
+                    "Доказательство не было представлено; дело разрешено на "
+                    "имеющихся материалах.",
+                    "",
+                ]
 
     if result.verified_norms:
         lines += ["## Подтверждённые нормы права (pravo.gov.ru)", ""]

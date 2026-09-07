@@ -71,6 +71,8 @@ EVENT_AGENT_START = "agent_start"  # агент начинает реплику 
 EVENT_DELTA = "delta"  # фрагмент генерируемого текста (role, round, text)
 EVENT_AGENT_END = "agent_end"  # реплика готова (role, round, text — полный текст)
 EVENT_JUDGE_DECISION = "judge_decision"  # решение судьи по раунду (continues, addressee)
+EVENT_EVIDENCE_REQUEST = "evidence_request"  # суд запрашивает доказательство (payload: request) — прения на паузе
+EVENT_EVIDENCE_PROVIDED = "evidence_provided"  # доказательство приобщено (payload: request, answer, provided)
 EVENT_RECOMMENDATIONS_DONE = "recommendations_done"  # блок рекомендаций готов (payload: target_side, prospects)
 EVENT_VERDICT_DONE = "verdict_done"  # итоговое решение вынесено
 EVENT_DEBATE_DONE = "debate_done"  # симуляция завершена (payload: статистика)
@@ -182,6 +184,7 @@ class DebateState(TypedDict, total=False):
     stopped: bool  # пользователь нажал «Остановить» (частичный результат)
     research_runs: int  # сколько раз собирался Evidence Pack (повторы — переквалификация)
     requalifications: Annotated[list[str], operator.add]  # причины переквалификаций дела
+    evidence_requests: Annotated[list[str], operator.add]  # запросы суда о доказательствах
     # Правовой research layer (этап 3):
     legal_issues: LegalIssues | None  # структурированные вопросы дела
     evidence_pack: EvidencePack | None  # собранный до прений набор источников
@@ -209,6 +212,7 @@ class DebateResult:
     citation_results: tuple[tuple[str, CitationVerificationResult], ...] = ()  # linter ссылок
     requalifications: tuple[str, ...] = ()  # переквалификации дела в ходе прений
     research_runs: int = 1  # сколько раз собирался Evidence Pack
+    evidence_requests: tuple[tuple[str, str, bool], ...] = ()  # (запрос, ответ, provided)
 
 
 def build_graph(
@@ -218,6 +222,7 @@ def build_graph(
     on_delta: OutputCallback | None = None,
     announce: SpeakerAnnouncer | None = None,
     should_stop: Callable[[], bool] | None = None,
+    wait_for_evidence: Callable[[str], str | None] | None = None,
 ):
     """Собрать и скомпилировать граф прений; вывод замыкается в узлы.
 
@@ -458,6 +463,59 @@ def build_graph(
                 ),
             )
         )
+        # Human-in-the-loop: суд запрашивает доказательство → пауза до ответа
+        # пользователя (или таймаута). Ответ приобщается к материалам дела.
+        evidence_requests = state.get("evidence_requests", [])
+        if decision.request_evidence and len(evidence_requests) < MAX_EVIDENCE_REQUESTS:
+            emit(
+                DebateEvent(
+                    EVENT_EVIDENCE_REQUEST,
+                    role=ROLE_JUDGE,
+                    round=round_number,
+                    payload={"request": decision.request_evidence},
+                )
+            )
+            answer = (
+                wait_for_evidence(decision.request_evidence)
+                if wait_for_evidence is not None
+                else None
+            )
+            provided = bool(answer and answer.strip())
+            emit(
+                DebateEvent(
+                    EVENT_EVIDENCE_PROVIDED,
+                    role=ROLE_JUDGE,
+                    round=round_number,
+                    payload={
+                        "request": decision.request_evidence,
+                        "answer": answer or "",
+                        "provided": provided,
+                    },
+                )
+            )
+            record = Statement(
+                speaker=ROLE_JUDGE,
+                round=round_number,
+                text=(
+                    f"**Доказательство приобщено судом** (запрос: {decision.request_evidence}):\n\n"
+                    f"{answer.strip()}"
+                    if provided
+                    else f"**Доказательство не представлено** (запрос суда: {decision.request_evidence})."
+                ),
+            )
+            logger.info(
+                "Узел %s: доказательство %s (%s).",
+                NODE_JUDGE,
+                "приобщено" if provided else "не представлено",
+                decision.request_evidence[:80],
+            )
+            return {
+                "history": [statement, record],
+                "judge_decision": decision,
+                "evidence_requests": [
+                    (decision.request_evidence, (answer or "").strip(), provided)
+                ],
+            }
         logger.info(
             "Узел %s: решение=%s (кому: %s).",
             NODE_JUDGE,
@@ -716,8 +774,11 @@ def _load_case_cached(cfg: Config) -> CaseMaterials:
     return _case_cache[key]
 
 
-#: Максимум переквалификаций за процесс (защита от циклов research → прения).
+#: Максимум переквалификаций за процесс (защита от циклов research → прение).
 MAX_REQUALIFICATIONS = 2
+
+#: Максимум запросов доказательств судом за процесс (human-in-the-loop).
+MAX_EVIDENCE_REQUESTS = 2
 
 
 def _run_evidence_pack(
@@ -818,6 +879,7 @@ def run_debate(
     on_delta: OutputCallback | None = None,
     announce: SpeakerAnnouncer | None = None,
     should_stop: Callable[[], bool] | None = None,
+    wait_for_evidence: Callable[[str], str | None] | None = None,
     config_path: str | None = None,
 ) -> DebateResult:
     """Запустить симуляцию прений и вернуть итог (история + вердикт).
@@ -830,6 +892,9 @@ def run_debate(
     :param on_delta: legacy-колбэк стриминга текста агентов (вывод в консоль).
     :param announce: legacy-колбэк объявления спикера (название роли, номер раунда).
     :param should_stop: колбэк кооперативной остановки (проверяется между LLM-вызовами).
+    :param wait_for_evidence: колбэк human-in-the-loop: получает запрос суда,
+        возвращает текст доказательства (или None — не представлено). Блокирует
+        поток симуляции до ответа пользователя/таймаута.
     :param config_path: путь к config.yaml (по умолчанию — config.yaml проекта).
     """
     effective = (
@@ -861,7 +926,12 @@ def run_debate(
     )
 
     graph = build_graph(
-        cfg, sink=sink, on_delta=on_delta, announce=announce, should_stop=should_stop
+        cfg,
+        sink=sink,
+        on_delta=on_delta,
+        announce=announce,
+        should_stop=should_stop,
+        wait_for_evidence=wait_for_evidence,
     )
     final: DebateState = graph.invoke({"target_side": target_side})
 
@@ -886,6 +956,7 @@ def run_debate(
             r for r in final.get("requalifications", []) if r
         ),
         research_runs=final.get("research_runs", 1),
+        evidence_requests=tuple(final.get("evidence_requests", [])),
     )
     logger.info(
         "Симуляция завершена: раундов=%d, завершена судьёй=%s, остановлена=%s, реплик=%d, "

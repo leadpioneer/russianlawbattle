@@ -52,6 +52,37 @@ class Session:
     stop_event: threading.Event = field(default_factory=threading.Event)
     pricing: dict = field(default_factory=dict)  # model -> ModelPricing (для оценки денег)
     cost_summary: dict | None = None  # сводка токенов/денег после завершения
+    # Human-in-the-loop: суд запросил доказательство → поток ждёт ответа.
+    evidence_request: str | None = None  # что запрошено (для UI/диагностики)
+    evidence_answer: str | None = None  # текст доказательства от пользователя
+    evidence_answer_event: threading.Event = field(default_factory=threading.Event)
+
+    def provide_evidence(self, text: str) -> bool:
+        """Передать доказательство ждущему потоку; True — если запрос был активен."""
+        if not self.evidence_request:
+            return False
+        self.evidence_answer = text
+        self.evidence_answer_event.set()
+        return True
+
+    def wait_for_evidence(self, request: str, timeout_s: float = 600.0) -> str | None:
+        """Колбэк для графа: опубликовать запрос и ждать ответа (пауза прений).
+
+        :param request: что запросил суд (текст маркера).
+        :param timeout_s: сколько ждать ответа пользователя.
+        :returns: текст доказательства или None (не представлено/таймаут/стоп).
+        """
+        self.evidence_answer = None
+        self.evidence_answer_event.clear()
+        self.evidence_request = request
+        logger.info("Сессия %s: суд запросил доказательство: %s", self.id, request[:120])
+        signaled = self.evidence_answer_event.wait(timeout=timeout_s)
+        self.evidence_request = None
+        if not signaled or self.stop_event.is_set():
+            return None
+        answer = self.evidence_answer
+        self.evidence_answer = None
+        return answer
 
     def request_stop(self) -> bool:
         """Запросить кооперативную остановку; True — если симуляция была running."""
@@ -168,6 +199,7 @@ def run_session_in_thread(session: Session) -> threading.Thread:
                 target_side=session.target_side,
                 sink=session.events.append,
                 should_stop=session.should_stop,
+                wait_for_evidence=session.wait_for_evidence,
             )
             session.result = result
             session.cost_summary = build_cost_summary(
