@@ -63,7 +63,8 @@ cd web; npm run dev                                                             
 | `src/legal/service.py` | оркестрация провайдеров, дедуп, ranking, coverage | research на mock-провайдерах |
 | `src/legal/providers/pravo_gov.py` | реквизиты актов (официальный API) | живой прогон «статья N <акт>» |
 | `src/legal/providers/supreme_court.py` | Пленум/обзоры ВС (vsrf.ru, уровень A) | живой healthcheck vsrf.ru |
-| `src/legal/providers/sonar.py` | веб-поиск НПА и практики (sonar на роутере) | живой прогон search_case_law/search_statutes |
+| `src/legal/providers/sonar.py` | веб-поиск НПА и практики (sonar на роутере, plugins + url_citation) | живой прогон search_case_law/search_statutes |
+| `src/legal/fulltext.py` | полная сверка источников (скачивание, ≥2 реквизитов, verified) | unit-тесты; живой прогон vsrf/pravo |
 | `src/legal/providers/mock.py` | тестовые фикстуры (без сети) | unit-тесты сервиса |
 | `src/legal/case_law.py` | user-акты (USER), coverage, disabled-расширения | классификация документов дела |
 | `src/legal/converters.py` | тексты статей (Консультант + markitdown) | живой прогон «статья 309 ГК РФ» |

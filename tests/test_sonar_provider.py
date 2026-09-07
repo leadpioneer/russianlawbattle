@@ -105,13 +105,61 @@ async def test_provider_healthcheck_with_post_hook():
 
 
 # -------------------------------------------------------------------------
-# Интеграция с сервисом
+# Парсер структурированных аннотаций url_citation (routerai web plugin)
 # -------------------------------------------------------------------------
 
 
-def test_sonar_in_default_provider_configs():
-    names = [provider.name for _, provider in LegalResearchService().providers]
-    assert "sonar_web_search" in names
+def test_parse_response_with_url_citations():
+    from src.legal.providers.sonar import parse_sonar_response
+
+    payload = {
+        "choices": [{
+            "message": {
+                "content": "Нашёл источники.",
+                "annotations": [
+                    {"type": "url_citation", "url_citation": {
+                        "url": "https://www.vsrf.ru/documents/plenum/14458/",
+                        "title": "Постановление Пленума ВС РФ № 17",
+                        "content": "О защите прав потребителей…",
+                    }},
+                    {"type": "url_citation", "url_citation": {
+                        "url": "https://spam.example.com/x",  # фильтруется
+                        "title": "Реклама", "content": "…",
+                    }},
+                ],
+            }
+        }],
+        "usage": {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15},
+    }
+    parsed = parse_sonar_response(payload)
+    assert len(parsed) == 1
+    assert parsed[0]["url"].startswith("https://www.vsrf.ru/")
+    assert parsed[0]["excerpt"].startswith("О защите")
+
+
+# -------------------------------------------------------------------------
+# Per-session настройки правового исследования
+# -------------------------------------------------------------------------
+
+
+def test_default_provider_configs_respect_web_search_flag():
+    from src.legal.service import default_provider_configs
+
+    names_with = [c.name for c in default_provider_configs({"web_search": True})]
+    names_without = [c.name for c in default_provider_configs({"web_search": False})]
+    assert "sonar_web_search" in names_with
+    assert "sonar_web_search" not in names_without
+    assert "pravo_gov" in names_without  # официальные остаются
+
+
+def test_service_uses_session_legal_research():
+    from src.legal.service import LegalResearchService
+
+    service = LegalResearchService(legal_research={"web_search": False})
+    names = [p.name for p, _ in [(provider, None) for _, provider in service.providers]]
+    assert "sonar_web_search" not in names
+    assert service.legal_research == {"web_search": False}
+
 
 
 def test_unknown_sonar_model_env_override(monkeypatch):

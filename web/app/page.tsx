@@ -15,7 +15,15 @@ interface SavedSettings {
   jurisdiction: string;
   maxRounds: number;
   targetSide: TargetSide;
+  webSearch: boolean;
+  searchModel: string;
 }
+
+const SEARCH_MODEL_PRESETS = [
+  "perplexity/sonar",
+  "perplexity/sonar-pro-search",
+  "perplexity/sonar-reasoning-pro",
+];
 
 function loadSavedSettings(): SavedSettings | null {
   try {
@@ -226,6 +234,9 @@ export default function Home() {
   const [jurisdiction, setJurisdiction] = useState(JURISDICTIONS[3]);
   const [maxRounds, setMaxRounds] = useState(2);
   const [targetSide, setTargetSide] = useState<TargetSide>("claimant");
+  // Веб-поиск правовых источников: флажок + алиас поисковой модели.
+  const [webSearch, setWebSearch] = useState(true);
+  const [searchModel, setSearchModel] = useState("perplexity/sonar");
   // Умный режим: преднастройки из config.yaml/.env (карточка вместо формы).
   const [configDefaults, setConfigDefaults] = useState<DefaultsData | null>(null);
   const [showFullForm, setShowFullForm] = useState(false);
@@ -285,6 +296,8 @@ export default function Home() {
           setJurisdiction(saved.jurisdiction);
           setMaxRounds(saved.maxRounds);
           setTargetSide(saved.targetSide);
+          if (typeof saved.webSearch === "boolean") setWebSearch(saved.webSearch);
+          if (typeof saved.searchModel === "string") setSearchModel(saved.searchModel);
         } else if (defaults.config_found && defaults.base_url) {
           setBaseUrl(defaults.base_url);
           if (defaults.model_claimant_lawyer) setModelClaimant(defaults.model_claimant_lawyer);
@@ -492,6 +505,8 @@ export default function Home() {
         jurisdiction,
         maxRounds,
         targetSide,
+        webSearch,
+        searchModel,
       };
       window.localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
       sessionIdRef.current = await createSession({
@@ -503,6 +518,8 @@ export default function Home() {
         jurisdiction,
         max_rounds: maxRounds,
         target_side: targetSide,
+        web_search: webSearch,
+        search_model: searchModel.trim() || null,
         llm_params: configDefaults?.llm_params ?? { reasoning: { effort: "low" } },
       });
       setStage("upload");
@@ -511,7 +528,7 @@ export default function Home() {
     } finally {
       setBusy(false);
     }
-  }, [baseUrl, apiKey, modelClaimant, modelDefendant, modelJudge, jurisdiction, maxRounds, targetSide, configDefaults]);
+  }, [baseUrl, apiKey, modelClaimant, modelDefendant, modelJudge, jurisdiction, maxRounds, targetSide, webSearch, searchModel, configDefaults]);
 
   const handleUpload = useCallback(async () => {
     const sessionId = sessionIdRef.current;
@@ -767,6 +784,38 @@ export default function Home() {
                 ))}
               </datalist>
             </label>
+            <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-3">
+              <label className="flex items-center gap-2 text-sm font-medium">
+                <input
+                  type="checkbox"
+                  className="h-4 w-4"
+                  checked={webSearch}
+                  onChange={(e) => setWebSearch(e.target.checked)}
+                />
+                ⚖ Веб-поиск правовых источников
+              </label>
+              <p className="mt-1 text-xs text-slate-500">
+                Дополняет pravo.gov.ru и ВС РФ практикой судов через поисковую модель.
+                Поиск тарифицируется роутером отдельно от токенов; базовый sonar дешевле.
+              </p>
+              {webSearch && (
+                <label className="mt-2 block text-sm">
+                  <span className="mb-1 block font-medium">Поисковая модель</span>
+                  <input
+                    list="search-model-presets"
+                    className="w-full rounded-lg border border-slate-300 px-3 py-2 font-mono text-xs"
+                    value={searchModel}
+                    onChange={(e) => setSearchModel(e.target.value)}
+                    placeholder="perplexity/sonar"
+                  />
+                  <datalist id="search-model-presets">
+                    {SEARCH_MODEL_PRESETS.map((item) => (
+                      <option key={item} value={item} />
+                    ))}
+                  </datalist>
+                </label>
+              )}
+            </div>
           </div>
           {aliasRole !== null && (
             <div className="mt-4 rounded-lg border border-blue-200 bg-blue-50 px-4 py-3">
@@ -1101,6 +1150,12 @@ export default function Home() {
                   )}
                 </span>
               </div>
+              {report.cost_summary.calls.some((c) => c.role === "legal_research") && (
+                <p className="mb-3 text-xs text-amber-700">
+                  ⚠ Вызовы веб-поиска (legal_research) тарифицируются роутером отдельно
+                  от токенов — фактическое списание может быть выше показанной суммы.
+                </p>
+              )}
               <div className="overflow-x-auto">
                 <table className="w-full text-xs">
                   <thead>
@@ -1273,7 +1328,7 @@ export default function Home() {
 
       <footer className="mt-8 text-center text-xs text-slate-400 no-print">
         ИИ-инструмент подготовки к спору. Не заменяет консультацию практикующего юриста.
-        <br />v0.5.0
+        <br />v0.6.0
       </footer>
     </main>
   );

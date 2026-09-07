@@ -50,6 +50,19 @@ _USER_PROMPT = (
     "подходящего не нашлось — напиши ровно: НИЧЕГО НЕ НАЙДЕНО"
 )
 
+_ALLOWED_URL_HOSTS = (
+    "pravo.gov.ru", "publication.pravo.gov.ru", "vsrf.ru", "www.vsrf.ru",
+    "sudact.ru", "kad.arbitr.ru", "sudrf.ru", "supcourt.ru",
+)
+
+#: Плагин веб-поиска routerai: ограничение результатов и доменов снижает
+#: поисковый контекст (он тарифицируется отдельно от токенов) и шум.
+_WEB_PLUGIN = {
+    "id": "web",
+    "max_results": 5,
+    "include_domains": list(_ALLOWED_URL_HOSTS),
+}
+
 #: Строка ответа sonar: «реквизиты | URL | суть».
 _RESULT_LINE_RE = re.compile(r"^\s*\d*[.)]?\s*(.+?)\s*\|\s*(\S+)\s*\|\s*(.+?)\s*$")
 
@@ -59,17 +72,39 @@ _MD_LINK_RE = re.compile(r"\[([^\]]{5,200})\]\((https?://[^)\s]+)\)")
 #: «Голые» URL в прозе ответа — последний резерв.
 _BARE_URL_RE = re.compile(r"https?://[^\s<>\"']{8,}")
 
-_ALLOWED_URL_HOSTS = (
-    "pravo.gov.ru", "publication.pravo.gov.ru", "vsrf.ru", "www.vsrf.ru",
-    "sudact.ru", "kad.arbitr.ru", "sudrf.ru", "supcourt.ru",
-)
+
+def parse_sonar_response(payload: dict) -> list[dict]:
+    """Разобрать JSON-ответ роутера: сначала аннотации url_citation (надёжно),
+    затем текстовые форматы. Список {title, url, excerpt} с фильтром доменов.
+    """
+    message = (payload.get("choices") or [{}])[0].get("message") or {}
+    text = str(message.get("content") or "")
+    annotations = message.get("annotations") or []
+
+    results: list[dict] = []
+    seen: set[str] = set()
+    # Резерв 0: структурированные аннотации url_citation (документация routerai).
+    for ann in annotations:
+        citation = (ann or {}).get("url_citation") or {}
+        url = str(citation.get("url") or "").strip()
+        if not _url_allowed(url) or url in seen:
+            continue
+        seen.add(url)
+        results.append({
+            "title": str(citation.get("title") or url)[:200],
+            "url": url,
+            "excerpt": str(citation.get("content") or "")[:400],
+        })
+    if results:
+        return results
+    return parse_sonar_answer(text, "")
 
 
 def parse_sonar_answer(answer: str, query: str) -> list[dict]:
-    """Разобрать ответ sonar в список словарей {title, url, excerpt}.
+    """Разобрать ТЕКСТ ответа sonar в список {title, url, excerpt}.
 
-    Сначала строгий формат «1. реквизиты | URL | суть», при пустом результате —
-    markdown-ссылки из текста. Ничего похожего на источники → [].
+    Три уровня: строгий формат «реквизиты | URL | суть» → markdown-ссылки →
+    «голые» URL в прозе. Ничего похожего на источники → [].
     """
     results: list[dict] = []
     seen_urls: set[str] = set()
@@ -164,10 +199,14 @@ class SonarWebSearchProvider:
         cfg = load_config()
         return cfg.api_base_url, cfg.api_key
 
-    def _ask(self, query: str, kind: str, limit: int) -> tuple[str, TokenUsage]:
-        """Один запрос к sonar; возвращает (текст, usage). Бросает исключения."""
+    def _ask(self, query: str, kind: str, limit: int) -> tuple[dict, TokenUsage]:
+        """Один запрос к sonar; возвращает (payload, usage). Бросает исключения."""
         if self._post is not None:
-            return self._post(query, kind)  # type: ignore[misc]
+            raw = self._post(query, kind)  # type: ignore[misc]
+            # Хук может вернуть как (text, usage), так и (payload, usage).
+            if isinstance(raw[0], dict):
+                return raw[0], raw[1]
+            return {"choices": [{"message": {"content": raw[0]}}]}, raw[1]
 
         base_url, api_key = self._credentials()
         url = f"{base_url.rstrip('/')}/chat/completions"
@@ -184,16 +223,16 @@ class SonarWebSearchProvider:
                     },
                 ],
                 "temperature": 0.2,
+                # Веб-поиск routerai: лимит результатов и официальный список
+                # доменов снижают поисковый контекст (отдельная тарификация).
+                "plugins": [_WEB_PLUGIN],
             },
             timeout=_HTTP_TIMEOUT_S,
         )
         response.raise_for_status()
         payload = response.json()
-        choice = (payload.get("choices") or [{}])[0]
-        message = choice.get("message") or {}
-        text = str(message.get("content") or "").strip()
         usage = TokenUsage.from_api(payload.get("usage") or {})
-        return text, usage
+        return payload, usage
 
     def _search(
         self, query: str, kind: str, *, source_type: str, authority: str, limit: int
@@ -203,7 +242,7 @@ class SonarWebSearchProvider:
             return []  # пустой запрос — честный пустой ответ (без фантазий)
         started = time.monotonic()
         try:
-            text, usage = self._ask(q, kind, limit)
+            payload, usage = self._ask(q, kind, limit)
         except Exception as exc:  # noqa: BLE001 — ошибка поиска → пусто, не падение
             logger.warning("%s: запрос не удался: %s", PROVIDER_NAME, exc)
             return []
@@ -211,17 +250,20 @@ class SonarWebSearchProvider:
         from ...llm_client import log_external_usage
 
         log_external_usage("legal_research", self._model, usage)
+        items = parse_sonar_response(payload)
+        text_len = len(str((payload.get("choices") or [{}])[0].get("message", {}).get("content") or ""))
         logger.info(
-            "%s: %s за %.1fс, токены %s, символов %d",
+            "%s: %s за %.1fс, токены %s, источников %d, символов %d",
             PROVIDER_NAME,
             kind,
             time.monotonic() - started,
             f"{usage.input_tokens}/{usage.output_tokens}" if usage.total_tokens else "нет",
-            len(text),
+            len(items),
+            text_len,
         )
 
         sources: list[LegalSource] = []
-        for index, item in enumerate(parse_sonar_answer(text, q)[:limit], start=1):
+        for index, item in enumerate(items[:limit], start=1):
             sources.append(
                 LegalSource(
                     id=f"WEB-{index:03d}",

@@ -15,6 +15,8 @@ export interface SetupPayload {
   max_rounds: number;
   target_side: TargetSide;
   llm_params: Record<string, unknown>;
+  web_search?: boolean;
+  search_model?: string | null;
 }
 
 export interface UploadResult {

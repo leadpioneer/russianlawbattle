@@ -81,17 +81,22 @@ def build_providers(configs: list[ProviderConfig]) -> list[tuple[ProviderConfig,
     return pairs
 
 
-def default_provider_configs() -> list[ProviderConfig]:
+def default_provider_configs(
+    legal_research: dict | None = None,
+) -> list[ProviderConfig]:
     """Дефолтная конфигурация провайдеров правового исследования.
 
-    sonar (веб-поиск) включается флагом ``legal_research.web_search`` в
-    config.yaml (по умолчанию — включён).
+    :param legal_research: настройки из конфига (config.yaml или сессии):
+        ``web_search`` (по умолчанию True), ``search_model``,
+        ``fulltext_verify`` (по умолчанию True).
+    sonar (веб-поиск) включается флагом ``web_search``.
     """
+    settings = legal_research or {}
     configs = [
         ProviderConfig(name="pravo_gov", enabled=True, priority=100, timeout_seconds=25.0),
         ProviderConfig(name="supreme_court_official", enabled=True, priority=90, timeout_seconds=25.0),
     ]
-    if _web_search_enabled():
+    if settings.get("web_search", True):
         # Веб-поиск через sonar (роутер): дополняет официальные API практикой
         # нижестоящих судов. Результаты — partially_verified (сверка вручную).
         configs.append(
@@ -115,8 +120,17 @@ def _web_search_enabled() -> bool:
 class LegalResearchService:
     """Единая точка правового исследования для графа и API."""
 
-    def __init__(self, provider_configs: list[ProviderConfig] | None = None) -> None:
-        self._configs = provider_configs if provider_configs is not None else default_provider_configs()
+    def __init__(
+        self,
+        provider_configs: list[ProviderConfig] | None = None,
+        *,
+        legal_research: dict | None = None,
+    ) -> None:
+        self.legal_research = dict(legal_research or {})
+        if provider_configs is not None:
+            self._configs = provider_configs
+        else:
+            self._configs = default_provider_configs(self.legal_research)
         self.providers = build_providers(self._configs)
 
     # -- health -----------------------------------------------------------
@@ -208,6 +222,10 @@ class LegalResearchService:
         self._renumber(statutes, prefix="LAW")
         self._renumber(case_law, prefix="CASE")
 
+        # Полная сверка веб-источников по полному тексту (top-K, см. fulltext.py).
+        if self.legal_research.get("fulltext_verify", True):
+            statutes, case_law = await self._enrich_fulltext(statutes, case_law)
+
         # Честное покрытие практики (шаг 8, п.4).
         searched = [
             provider.name
@@ -259,6 +277,38 @@ class LegalResearchService:
         )
 
     # -- helpers -----------------------------------------------------------
+
+    #: Сколько источников каждого типа сверять по полному тексту за прогон.
+    FULLTEXT_TOP_K = 4
+
+    async def _enrich_fulltext(
+        self, statutes: list[LegalSource], case_law: list[LegalSource]
+    ) -> tuple[list[LegalSource], list[LegalSource]]:
+        """Поднять часть веб-источников до verified через сверку полного текста.
+
+        Только источники sonar (provider=sonar_web_search) с URL, top-K каждого
+        типа; каждая сверка в отдельном потоке, ошибка не прерывает сборку.
+        """
+        import asyncio
+
+        from .fulltext import verify_source_fulltext
+
+        def _upgrade(sources: list[LegalSource]) -> list[LegalSource]:
+            candidates = [
+                (i, s) for i, s in enumerate(sources)
+                if s.provider == "sonar_web_search" and s.official_url
+            ][: self.FULLTEXT_TOP_K]
+            result = list(sources)
+            for i, source in candidates:
+                try:
+                    result[i] = verify_source_fulltext(source)
+                except Exception as exc:  # noqa: BLE001 — никогда не роняем research
+                    logger.warning("fulltext: %s: %s", source.id, exc)
+            return result
+
+        statutes = await asyncio.to_thread(_upgrade, statutes)
+        case_law = await asyncio.to_thread(_upgrade, case_law)
+        return statutes, case_law
 
     @staticmethod
     def _dedupe(sources: list[LegalSource]) -> list[LegalSource]:

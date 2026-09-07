@@ -150,6 +150,8 @@ class SetupRequest(BaseModel):
     max_context_tokens: int = Field(default=12_000, ge=1_000, le=2_000_000)
     target_side: Literal["claimant", "defendant"] = "claimant"
     llm_params: dict[str, Any] = Field(default_factory=dict, description="Доп. параметры запроса (reasoning и т.п.)")
+    web_search: bool = Field(default=True, description="Веб-поиск правовых источников (sonar на роутере)")
+    search_model: str | None = Field(default=None, description="Алиас поисковой модели (напр. perplexity/sonar)")
 
     @field_validator("base_url")
     @classmethod
@@ -166,7 +168,23 @@ class SetupRequest(BaseModel):
 
 
 def _build_config(request: SetupRequest, session_dir: Path) -> Config:
-    """Конфиг сессии: поля формы + project_root каталога сессии."""
+    """Конфиг сессии: поля формы + project_root каталога сессии.
+
+    Настройки правового исследования: из формы, с fallback на config.yaml.
+    """
+    legal_research: dict[str, Any] = {}
+    try:
+        from .config import load_config
+
+        legal_research = dict(load_config().legal_research)
+    except Exception:  # noqa: BLE001 — config.yaml опционален
+        legal_research = {}
+    legal_research["web_search"] = request.web_search
+    if request.search_model and request.search_model.strip():
+        legal_research["search_model"] = request.search_model.strip()
+    elif "search_model" in legal_research:
+        legal_research.pop("search_model")  # пусто в форме → дефолт/env
+
     return Config(
         api_base_url=request.base_url,
         api_key=request.api_key.strip(),
@@ -178,6 +196,7 @@ def _build_config(request: SetupRequest, session_dir: Path) -> Config:
         max_rounds=request.max_rounds,
         max_context_tokens=request.max_context_tokens,
         llm_params=dict(request.llm_params),
+        legal_research=legal_research,
         project_root=session_dir,
     )
 

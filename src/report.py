@@ -205,6 +205,12 @@ def render_report(result: DebateResult, generated_at: datetime | None = None) ->
         if any(role == "judge" for role, _, _ in result.usage_log):
             lines.append("*Примечание: расходы на формулирование запросов норм права "
                          "и суммаризацию входят в строки с ролью соответствующего агента.*")
+        if any(role == "legal_research" for role, _, _ in result.usage_log):
+            lines.append(
+                "*⚠ Примечание: вызовы веб-поиска (роль `legal_research`) тарифицируются "
+                "роутером отдельно от токенов — фактическое списание может быть выше "
+                "показанной суммы.*"
+            )
         lines.append("")
 
     if result.recommendations is not None:

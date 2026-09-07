@@ -738,7 +738,9 @@ def _run_evidence_pack(
     from .legal.evidence_pack import build_evidence_pack_async
     from .legal.service import LegalResearchService
 
-    service = LegalResearchService()  # одна точка: и healthcheck, и research
+    service = LegalResearchService(  # одна точка: и healthcheck, и research
+        legal_research=getattr(cfg, "legal_research", None)
+    )
 
     async def _status_forwarder():
         statuses = await service.healthcheck_all()
