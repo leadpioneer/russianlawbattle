@@ -68,27 +68,23 @@ def _extract_requirement_keys(source: LegalSource) -> set[str]:
     return {k for k in keys if len(k) >= 3}
 
 
-def _match_count(keys: set[str], page_text: str) -> list[str]:
-    """Реквизиты, найденные в тексте страницы.
+def _find_key(page_text: str, key: str) -> int:
+    """Позиция ключа в тексте: прямое вхождение или текстовый формат даты."""
+    pos = page_text.find(key)
+    if pos >= 0:
+        return pos
+    date_match = re.fullmatch(r"(\d{2})\.(\d{2})\.(\d{4})", key)
+    if date_match:
+        day, month, year = date_match.groups()
+        text_variant = f"{int(day)} {_MONTH_NAMES.get(int(month), '')} {year}"
+        if month and text_variant in page_text:
+            return page_text.find(text_variant)
+    return -1
 
-    Даты «28.06.2012» дополнительно проверяются в текстовом формате
-    «28 июня 2012» (как пишут на официальных сайтах).
-    """
-    matched: list[str] = []
-    for key in keys:
-        if key in page_text:
-            matched.append(key)
-            continue
-        date_match = re.fullmatch(r"(\d{2})\.(\d{2})\.(\d{4})", key)
-        if date_match:
-            day, month, year = date_match.groups()
-            month_name = _MONTH_NAMES.get(int(month))
-            text_variant = (
-                f"{int(day)} {month_name} {year}" if month_name else ""
-            )
-            if text_variant and text_variant in page_text:
-                matched.append(key)
-    return matched
+
+def _match_count(keys: set[str], page_text: str) -> list[str]:
+    """Реквизиты, найденные в тексте страницы (см. :func:`_find_key`)."""
+    return [key for key in keys if _find_key(page_text, key) >= 0]
 
 
 _MONTH_NAMES = {
@@ -100,7 +96,7 @@ _MONTH_NAMES = {
 
 def _excerpt_around(page_text: str, key: str) -> str:
     """Окно текста вокруг первого вхождения ключа (реальная цитата)."""
-    pos = page_text.find(key)
+    pos = _find_key(page_text, key)
     if pos < 0:
         return ""
     start = max(0, pos - _EXCERPT_WINDOW // 2)
